@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release Tag (e.g. v1.2.0)"
+        description: "Release Tag (e.g. v1.3.0)"
         required: false
-        default: "v1.2.0"
+        default: "v1.3.0"
   push:
     branches:
       - master
@@ -93,7 +93,7 @@ jobs:
           GOOS: "windows"
           GOARCH: "amd64"
         run: |
-          $ver = "v1.2.0"
+          $ver = "v1.3.0"
           $commit = (git rev-parse --short=8 HEAD)
           $buildTime = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls" `
@@ -173,7 +173,6 @@ jobs:
             exit 1
           }
 
-          # Verify the Windows 11 installer executes a silent extraction & shortcut/registry test cleanly
           $testInstallDir = Join-Path $env:RUNNER_TEMP "ResinWin11InstallerTest"
           $iproc = Start-Process -FilePath ".\dist_installer\Resin-Setup-win64.exe" -ArgumentList "/S", "/DIR=`"$testInstallDir`"" -Wait -PassThru -NoNewWindow
           if ($iproc.ExitCode -ne 0 -or -not (Test-Path (Join-Path $testInstallDir "Resin.exe"))) {
@@ -191,7 +190,7 @@ jobs:
           retention-days: 5
 
   build-android-apk:
-    name: Build Android APK (arm64-v8a + 16KB Aligned + Release Signed)
+    name: Build Android APK (arm64-v8a + Cutout/UDC Adaptive + 16KB Aligned)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -219,7 +218,7 @@ jobs:
           GOOS: "linux"
           GOARCH: "arm64"
         run: |
-          VERSION="v1.2.0"
+          VERSION="v1.3.0"
           GIT_COMMIT=$(git rev-parse --short=8 HEAD)
           BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
@@ -269,7 +268,7 @@ jobs:
           APKSIGNER_BIN=$(find $ANDROID_HOME/build-tools -name "apksigner" | sort -V | tail -n 1)
 
           if [ -n "$ZIPALIGN_BIN" ] && [ -n "$APKSIGNER_BIN" ]; then
-            "$ZIPALIGN_BIN" -P 16 -f -v 4 "$RAW_APK" ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
+            "$ZIPALIGN_BIN" -P 16 -f -v 4 "$RAW_APK" ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
             "$APKSIGNER_BIN" sign --ks app/resin-release.jks \
               --ks-key-alias resin_key \
               --ks-pass pass:resin_release_store \
@@ -277,22 +276,22 @@ jobs:
               --v1-signing-enabled true \
               --v2-signing-enabled true \
               --v3-signing-enabled true \
-              ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
-            "$APKSIGNER_BIN" verify -v ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
+              ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
+            "$APKSIGNER_BIN" verify -v ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
           else
-            cp "$RAW_APK" ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
+            cp "$RAW_APK" ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
           fi
-          ls -lh ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
+          ls -lh ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
 
       - name: Upload Android APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: dist_apk/Resin-v1.2.0-arm64-v8a.apk
+          path: dist_apk/Resin-v1.3.0-arm64-v8a.apk
           retention-days: 5
 
   publish-release:
-    name: Publish GitHub Release v1.2.0 (Setup.exe & APK)
+    name: Publish GitHub Release v1.3.0 (Setup.exe & Adaptive APK)
     runs-on: ubuntu-latest
     needs: [build-windows-setup, build-android-apk]
     permissions:
@@ -308,41 +307,39 @@ jobs:
         run: |
           ls -lh release_assets/
           test -f release_assets/Resin-Setup-win64.exe
-          test -f release_assets/Resin-v1.2.0-arm64-v8a.apk
+          test -f release_assets/Resin-v1.3.0-arm64-v8a.apk
 
       - name: Create Release Notes
         run: |
           cat << 'EOF' > release_notes.md
-          ## 🛡️ Resin 智能代理池网关 v1.2.0 (Windows 11 全中文现代安装器 & Android VPN 透明接管版)
+          ## 🛡️ Resin 智能代理池网关 v1.3.0 (Android 异形屏/屏下摄像头自适应 & Windows 11 全中文现代安装器)
 
-          本发行版基于上游 [`Resinat/Resin`](https://github.com/Resinat/Resin) 深度构建与全面升级，提供 **全新 Windows 11 Fluent Dark 全中文现代安装包 (`Resin-Setup-win64.exe`)** 与 **Android 64 位 16KB 对齐签名安装包 (`Resin-v1.2.0-arm64-v8a.apk`)**。
+          本发行版基于上游 [`Resinat/Resin`](https://github.com/Resinat/Resin) 深度构建，提供 **Android 异形屏与屏下摄像头 (UDC) 全场景自适应安装包 (`Resin-v1.3.0-arm64-v8a.apk`)** 与 **Windows 11 Fluent Dark 全中文现代安装包 (`Resin-Setup-win64.exe`)**。
 
-          ### ✨ v1.2.0 核心新增与优化特性
-          1. **全新 Windows 11 Fluent Dark 全中文现代安装器 (`Resin-Setup-win64.exe`)**
-             - **100% 纯正简体中文现代界面**：彻底替换旧式英文安装向导，采用原生 `.NET WPF` + Windows 11 `DWM` 圆角暗色卡片视觉风格（`#0B1120` 深海暗色底座 + 霓虹青蓝/翡翠流光渐变进度条）。
-             - **一键极速安装与自定义选项**：支持自定义安装路径、创建桌面与开始菜单快捷方式、配置开机自动启动、实时展示多线程文件部署进度，并内置全中文图形化卸载向导（`Uninstall-Resin.exe`）与 Windows 11「设置 -> 已安装的应用」完整注册。
-          2. **Windows 桌面端重磅升级 (`PySide6 Qt 6`)**
-             - **系统托盘最小化常驻 (`QSystemTrayIcon`) 与开机自启**：关闭主窗口时自动最小化驻留至右下角系统托盘（支持托盘气泡提示、双击唤醒、托盘右键快捷启动/重启引擎、一键切换系统代理、立即触发 AI 自愈巡检），并提供顶栏「☑ 开机自启」实时开关。
-             - **硬件加速实时动态双折线图大屏 (`RealtimeLineChartWidget`)**：在总览页直接绘制**上行/下行实时吞吐速率 (KB/s)** 与**活跃并发连接数 / 活跃粘性租约数**动态渐变折线曲线。
-             - **AI 自动巡检与节点池故障自愈守护引擎 (`AutoHealWatchdog`)**：后台定时巡检所有订阅与 Platform，自动清理熔断节点、对熔断节点发起主动延迟恢复探测、刷新低健康率订阅并重建平台可路由视图。
-             - **保留开箱即用默认凭证**：维持默认端口 `2260`、管理密码 `admin123`、代理密码 `my-token`，零配置门槛即可启动使用。
-          3. **Android 移动端重磅升级 (`Resin-v1.2.0-arm64-v8a.apk`)**
-             - **Android `VpnService` 全局与分应用 (Per-App) 透明代理接管**：无需 Root，一键开启系统级 VPN 透明代理隧道（支持全局接管并自动排除自身防回环、白名单仅指定 App 走 Resin、黑名单排除指定 App 直连三种模式）。
-             - **手机开机自动启动本地网关 (`BootCompletedReceiver`)**：支持监听系统 `BOOT_COMPLETED` 广播，手机重启后自动在后台拉起本地 `libresin_core.so` 网关引擎。
-             - **OnePlus 15R (Android 16) 16KB 页面对齐与 V1/V2/V3 正式签名**：通过 `zipalign -P 16` 与专属 Release 证书签名，完美适配 Android 16 16KB 内存页规范。
+          ### 📱 v1.3.0 Android 异形屏与屏下摄像头 (UDC) 自适应引擎新增特性
+          1. **全形态异形屏智能识别与四向避让 (`AdaptiveScreenManager.kt`)**
+             - 基于 `WindowInsetsCompat` (`systemBars()` + `displayCutout()` + `ime()`) 与 `LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS` 全屏沉浸延伸架构，自动检测并分类 **顶部居中单挖孔/水滴屏**、**左上角前置挖孔屏**、**右上角前置挖孔屏**、**居中宽药丸双挖孔/刘海屏**、**横屏侧边开孔** 以及 **真全面屏/屏下摄像头 (UDC)**。
+             - 原生声明多厂商异形屏与超长纵横比（`2.6:1`）适配元数据（`android.notch_support`、`notch.config`、`oo.display.cutout_support`），消除顶部/底部黑边，同时确保顶栏标题、快捷按钮、底部列表及内嵌 WebUI 控制台永不被挖孔或全面屏手势横条遮挡。
+          2. **屏下摄像头 (UDC - Under-Display Camera) 光学防眩光消光保护带**
+             - 针对屏下摄像头机型（如真全面屏 UDC 手机与折叠屏内屏 UDC），内置 `#03050A` 超低亮度纯黑消光保护区（`UDC 屏下镜头光学消光保护区`），防止高亮度像素在屏下镜头感光区造成衍射眩光或纱窗纹干扰，并自动将交互控件下移避开镜头光轴。
+          3. **双曲面瀑布屏 / 折叠屏大屏防误触与实时微调面板**
+             - 在主页新增 **「📱 异形屏与屏下摄像头 (UDC) 自适应」** 实时控制卡片，支持一键切换 4 种自适应模式（`智能自动感应` / `屏下摄像头光学防眩光模式` / `异形屏增强四向安全避让` / `双曲面瀑布屏与折叠屏防误触`），支持一键微调顶部避让高度（`0dp ~ +18dp`）与曲面侧边防误触边距（`0dp ~ +20dp`），并实时展示屏幕物理分辨率、开孔坐标矩阵 (`Cutout Rects`) 与四向安全内边距。
+
+          ### 💻 Windows 11 Fluent Dark 全中文现代安装包 (`Resin-Setup-win64.exe`)
+          - **100% 简体中文 Windows 11 圆角暗色卡片安装向导**（内置全中文图形化卸载程序 `Uninstall-Resin.exe`）、系统托盘最小化常驻、开机自启开关、实时双动态折线图大屏与 AI 自动巡检自愈引擎。
           EOF
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || 'v1.2.0' }}
-          name: "Resin 智能代理池网关 ${{ inputs.release_tag || 'v1.2.0' }} (Win11 全中文现代安装包 & Android APK)"
+          tag_name: ${{ inputs.release_tag || 'v1.3.0' }}
+          name: "Resin 智能代理池网关 ${{ inputs.release_tag || 'v1.3.0' }} (异形屏/屏下摄像头自适应 APK & Win11 中文安装器)"
           body_path: release_notes.md
           draft: false
           prerelease: false
           overwrite_files: true
           files: |
             release_assets/Resin-Setup-win64.exe
-            release_assets/Resin-v1.2.0-arm64-v8a.apk
+            release_assets/Resin-v1.3.0-arm64-v8a.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

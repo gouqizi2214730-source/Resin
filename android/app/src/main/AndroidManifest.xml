@@ -15,14 +15,33 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="Resin 代理池网关"
+        android:resizeableActivity="true"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
-        android:theme="@style/Theme.Material3.Dark.NoActionBar">
+        android:theme="@style/Theme.Resin.EdgeToEdge">
+
+        <!-- 超宽屏/折叠屏纵横比与多厂商异形屏（挖孔/刘海/水滴/屏下摄像头）原生声明 -->
+        <meta-data
+            android:name="android.max_aspect"
+            android:value="2.6" />
+        <meta-data
+            android:name="android.notch_support"
+            android:value="true" />
+        <meta-data
+            android:name="notch.config"
+            android:value="portrait|landscape" />
+        <meta-data
+            android:name="oo.display.cutout_support"
+            android:value="true" />
+        <meta-data
+            android:name="android.supports_size_changes"
+            android:value="true" />
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

@@ -6,6 +6,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -17,11 +18,13 @@ import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -49,16 +52,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val uiHandler = Handler(Looper.getMainLooper())
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var headerLayout: LinearLayout
+    private lateinit var udcOpticalBar: LinearLayout
+    private lateinit var udcSensorPill: TextView
     private lateinit var contentContainer: LinearLayout
+    private lateinit var adaptiveManager: AdaptiveScreenManager
     private var activeTabIndex = 0
 
-    // Connection settings
+    // Connection & Screen settings
     private var gatewayUrl = "http://127.0.0.1:2260"
     private var adminToken = "admin123"
     private var proxyToken = "my-token"
     private var bootAutoStart = true
     private var vpnAppMode = 0
     private var vpnAppPackages = "com.android.chrome"
+    private var screenAdaptMode = AdaptiveScreenManager.MODE_AUTO
+    private var screenExtraTopDp = 0
+    private var screenCurvedEdgeDp = 0
 
     // LLM Settings
     private var llmBaseUrl = "https://api.deepseek.com/v1"
@@ -68,6 +79,7 @@ class MainActivity : AppCompatActivity() {
     // Dashboard live views
     private var tvEngineStatus: TextView? = null
     private var tvVpnStatus: TextView? = null
+    private var tvScreenDiag: TextView? = null
     private var tvMetricsSummary: TextView? = null
     private var tvCoreLogs: TextView? = null
     private var webViewInstance: WebView? = null
@@ -104,10 +116,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         loadPrefs()
 
-        window.statusBarColor = Color.parseColor("#0F172A")
-        window.navigationBarColor = Color.parseColor("#0F172A")
+        adaptiveManager = AdaptiveScreenManager(this)
+        adaptiveManager.configureWindowEdgeToEdge()
 
-        val root = LinearLayout(this).apply {
+        rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#0F172A"))
             layoutParams = ViewGroup.LayoutParams(
@@ -116,20 +128,39 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // Top App Header
-        val header = LinearLayout(this).apply {
+        // Top App Header (支持异形屏挖孔/刘海四向避让 + 屏下摄像头 UDC 光学防眩光带)
+        headerLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#1E293B"))
-            setPadding(dp(16), dp(14), dp(16), dp(10))
+            setPadding(dp(16), dp(28), dp(16), dp(10))
         }
+
+        // 屏下摄像头 (UDC) 低亮度纯黑光学消光保护区
+        udcOpticalBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(0, 0, 0, dp(6))
+        }
+        udcSensorPill = TextView(this).apply {
+            text = "◉ UDC 屏下镜头光学消光保护区"
+            setTextColor(Color.parseColor("#334155"))
+            textSize = 10f
+            gravity = Gravity.CENTER
+            background = roundedBg("#03050A", dp(12), "#1E293B")
+            setPadding(dp(14), dp(3), dp(14), dp(3))
+        }
+        udcOpticalBar.addView(udcSensorPill)
+        headerLayout.addView(udcOpticalBar)
+
         val titleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         val tvTitle = TextView(this).apply {
-            text = "🛡️ Resin 智能代理池网关 v1.2.0"
+            text = "🛡️ Resin 智能代理池网关 v1.3.0"
             setTextColor(Color.parseColor("#38BDF8"))
-            textSize = 17.5f
+            textSize = 17f
             setTypeface(typeface, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -146,7 +177,7 @@ class MainActivity : AppCompatActivity() {
         titleRow.addView(tvTitle)
         titleRow.addView(btnQuickHeal)
         titleRow.addView(btnQuickStart)
-        header.addView(titleRow)
+        headerLayout.addView(titleRow)
 
         // Navigation Tabs Bar
         val navScroll = HorizontalScrollView(this).apply {
@@ -157,7 +188,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
         }
         val tabs = listOf(
-            "🚀 总览与VPN接管",
+            "🚀 总览与屏幕自适应",
             "📡 订阅与节点",
             "🎯 平台与租约",
             "🔌 接入点与日志",
@@ -184,8 +215,8 @@ class MainActivity : AppCompatActivity() {
             navRow.addView(btn)
         }
         navScroll.addView(navRow)
-        header.addView(navScroll)
-        root.addView(header)
+        headerLayout.addView(navScroll)
+        rootLayout.addView(headerLayout)
 
         contentContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -195,12 +226,50 @@ class MainActivity : AppCompatActivity() {
                 1f
             )
         }
-        root.addView(contentContainer)
-        setContentView(root)
+        rootLayout.addView(contentContainer)
+        setContentView(rootLayout)
+
+        // 绑定异形屏、挖孔屏、屏下摄像头 (UDC)、折叠屏与软键盘自适应 Insets 监听器
+        adaptiveManager.attachAdaptiveInsetsListener(rootLayout) { profile ->
+            applyScreenAdaptation(profile)
+        }
 
         switchTab(0)
         uiHandler.post(logRefreshRunnable)
         startLocalEngine()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        adaptiveManager.recomputeNow(rootLayout) { profile ->
+            applyScreenAdaptation(profile)
+        }
+    }
+
+    private fun applyScreenAdaptation(profile: AdaptiveScreenManager.ScreenAdaptationProfile) {
+        val horizPadBase = if (profile.isFoldableOrTablet) dp(24) else dp(14)
+        headerLayout.setPadding(
+            horizPadBase + profile.safeLeftPx + profile.headerLeftShiftPx,
+            profile.safeTopPx,
+            horizPadBase + profile.safeRightPx + profile.headerRightShiftPx,
+            dp(10)
+        )
+
+        if (profile.showUdcOpticalGuard) {
+            udcOpticalBar.visibility = View.VISIBLE
+            udcSensorPill.minWidth = profile.udcZoneWidthPx
+        } else {
+            udcOpticalBar.visibility = View.GONE
+        }
+
+        contentContainer.setPadding(
+            profile.safeLeftPx,
+            0,
+            profile.safeRightPx,
+            profile.safeBottomPx
+        )
+
+        tvScreenDiag?.text = adaptiveManager.formatDiagnosticsText()
     }
 
     private fun loadPrefs() {
@@ -211,6 +280,9 @@ class MainActivity : AppCompatActivity() {
         bootAutoStart = prefs.getBoolean("boot_auto_start", true)
         vpnAppMode = prefs.getInt("vpn_app_mode", 0)
         vpnAppPackages = prefs.getString("vpn_app_packages", "com.android.chrome") ?: "com.android.chrome"
+        screenAdaptMode = prefs.getInt("screen_adapt_mode", AdaptiveScreenManager.MODE_AUTO)
+        screenExtraTopDp = prefs.getInt("screen_extra_top_dp", 0)
+        screenCurvedEdgeDp = prefs.getInt("screen_curved_edge_dp", 0)
         llmBaseUrl = prefs.getString("llm_base_url", "https://api.deepseek.com/v1") ?: "https://api.deepseek.com/v1"
         llmModel = prefs.getString("llm_model", "deepseek-chat") ?: "deepseek-chat"
         llmApiKey = prefs.getString("llm_api_key", "") ?: ""
@@ -226,6 +298,9 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("boot_auto_start", bootAutoStart)
             .putInt("vpn_app_mode", vpnAppMode)
             .putString("vpn_app_packages", vpnAppPackages)
+            .putInt("screen_adapt_mode", screenAdaptMode)
+            .putInt("screen_extra_top_dp", screenExtraTopDp)
+            .putInt("screen_curved_edge_dp", screenCurvedEdgeDp)
             .putString("llm_base_url", llmBaseUrl)
             .putString("llm_model", llmModel)
             .putString("llm_api_key", llmApiKey)
@@ -356,13 +431,73 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // Tab 0: 总览、本地引擎、开机自启与 VpnService 分应用透明接管
+    // Tab 0: 总览、异形屏/屏下摄像头自适应、本地引擎、开机自启与 VpnService 接管
     // =========================================================================
     private fun buildDashboardTab() {
         val scroll = ScrollView(this)
         val col = createColumn()
 
-        // 1. Engine & Boot Auto-Start Card
+        // 1. 异形屏与屏下摄像头 (UDC) 自适应显示引擎卡片
+        val screenCard = createCard("📱 异形屏 (挖孔/药丸/刘海/曲面/折叠) 与屏下摄像头 (UDC) 自适应")
+        val spnScreenMode = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf(
+                    "智能自动感应 (自动识别挖孔/刘海/屏下摄像头 UDC)",
+                    "屏下摄像头 (UDC) 光学防眩光与消光保护区模式",
+                    "异形屏 (挖孔/药丸/刘海/横屏侧边) 增强四向安全避让",
+                    "双曲面瀑布屏 / 折叠屏大屏边缘防误触增强模式"
+                )
+            )
+            setSelection(screenAdaptMode.coerceIn(0, 3))
+            setBackgroundColor(Color.parseColor("#0F172A"))
+        }
+
+        tvScreenDiag = createMonoBox(adaptiveManager.formatDiagnosticsText())
+
+        spnScreenMode.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (screenAdaptMode != position) {
+                    screenAdaptMode = position
+                    savePrefs()
+                    adaptiveManager.recomputeNow(rootLayout) { applyScreenAdaptation(it) }
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        screenCard.addView(createLabel("屏幕形态与摄像头避让策略 (切换后即时生效):"))
+        screenCard.addView(spnScreenMode)
+
+        // 顶部安全区高度微调与曲面侧边防误触微调快捷按钮行
+        val tuneRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        tuneRow.addView(createButton("顶部避让: +${screenExtraTopDp}dp (点击切换)", "#334155") {
+            val steps = listOf(0, 6, 12, 18)
+            val nextIdx = (steps.indexOf(screenExtraTopDp) + 1) % steps.size
+            screenExtraTopDp = steps[nextIdx]
+            savePrefs()
+            adaptiveManager.recomputeNow(rootLayout) { applyScreenAdaptation(it) }
+            switchTab(0)
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) } })
+
+        tuneRow.addView(createButton("曲面侧边距: +${screenCurvedEdgeDp}dp (点击切换)", "#334155") {
+            val steps = listOf(0, 8, 14, 20)
+            val nextIdx = (steps.indexOf(screenCurvedEdgeDp) + 1) % steps.size
+            screenCurvedEdgeDp = steps[nextIdx]
+            savePrefs()
+            adaptiveManager.recomputeNow(rootLayout) { applyScreenAdaptation(it) }
+            switchTab(0)
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) })
+
+        screenCard.addView(tuneRow)
+        screenCard.addView(tvScreenDiag)
+        col.addView(screenCard)
+
+        // 2. Engine & Boot Auto-Start Card
         val engineCard = createCard("⚙️ 本地网关引擎、开机自启与远程连接配置")
         tvEngineStatus = TextView(this).apply {
             text = "● 正在检测本地 Resin 核心引擎状态..."
@@ -426,7 +561,7 @@ class MainActivity : AppCompatActivity() {
         engineCard.addView(btnRow)
         col.addView(engineCard)
 
-        // 2. Android VpnService Per-App Transparent Proxy Card
+        // 3. Android VpnService Per-App Transparent Proxy Card
         val vpnCard = createCard("🛡️ Android VPN 全局 / 分应用透明代理接管 (免 Root)")
         tvVpnStatus = TextView(this).apply {
             text = if (ResinVpnService.isVpnActive()) "🟢 VPN 透明代理隧道: 已开启" else "⚪ VPN 透明代理隧道: 未开启"
@@ -473,7 +608,7 @@ class MainActivity : AppCompatActivity() {
         vpnCard.addView(vpnBtnRow)
         col.addView(vpnCard)
 
-        // 3. Live Metrics Snapshot Card
+        // 4. Live Metrics Snapshot Card
         val metricCard = createCard("📊 节点池健康快照与实时指标")
         tvMetricsSummary = TextView(this).apply {
             text = "正在拉取 Resin 节点池实时指标..."
@@ -497,7 +632,7 @@ class MainActivity : AppCompatActivity() {
         metricCard.addView(metricBtnRow)
         col.addView(metricCard)
 
-        // 4. Quick Copy & Sticky Proxy Workshop
+        // 5. Quick Copy & Sticky Proxy Workshop
         val proxyCard = createCard("⚡ 粘性代理一键复制与连通性实测")
         val inpTestPlat = createInput("Default", "平台名 Platform")
         val inpTestAcc = createInput("mobile_user_01", "业务粘性账号 Account")
@@ -544,7 +679,7 @@ class MainActivity : AppCompatActivity() {
         proxyCard.addView(tvTestResult)
         col.addView(proxyCard)
 
-        // 5. Core Engine Live Console Logs
+        // 6. Core Engine Live Console Logs
         val logCard = createCard("🖥️ 本地 Resin 核心引擎与 AI 自愈实时日志")
         tvCoreLogs = createMonoBox(ResinCoreService.getLogsText())
         logCard.addView(tvCoreLogs)
@@ -568,7 +703,7 @@ class MainActivity : AppCompatActivity() {
             if (okInfo) {
                 try {
                     val info = JSONObject(infoRaw)
-                    sb.append("核心版本: ").append(info.optString("version", "v1.2.0"))
+                    sb.append("核心版本: ").append(info.optString("version", "v1.3.0"))
                         .append(" (Commit: ").append(info.optString("git_commit", "-")).append(")\n")
                 } catch (_: Exception) {}
             }
@@ -1196,10 +1331,10 @@ class MainActivity : AppCompatActivity() {
                     conn.setRequestProperty("User-Agent", "Mozilla/5.0 (compatible; Google-Agent; +https://developers.google.com/crawling/docs/crawlers-fetchers/google-agent)")
                     val raw = conn.inputStream.bufferedReader().readText()
                     val rel = JSONObject(raw)
-                    val tag = rel.optString("tag_name", "v1.2.0")
+                    val tag = rel.optString("tag_name", "v1.3.0")
                     val htmlUrl = rel.optString("html_url", "https://github.com/gouqizi2214730-source/Resin/releases")
                     uiHandler.post {
-                        tvDsOut.text = "最新 GitHub Release: $tag\n当前版本: v1.2.0\n发布页面: $htmlUrl"
+                        tvDsOut.text = "最新 GitHub Release: $tag\n当前版本: v1.3.0\n发布页面: $htmlUrl"
                     }
                 } catch (e: Exception) {
                     uiHandler.post { tvDsOut.text = "检查更新异常: ${e.message}" }
@@ -1216,7 +1351,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // Tab 5: 内置完整 React WebUI 控制台 (WebView)
+    // Tab 5: 内置完整 React WebUI 控制台 (WebView + 异形屏 Safe-Area CSS 注入)
     // =========================================================================
     @SuppressLint("SetJavaScriptEnabled")
     private fun buildWebConsoleTab() {
@@ -1233,7 +1368,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(10), dp(6), dp(10), dp(6))
         }
         val tvUrl = TextView(this).apply {
-            text = "WebUI: $gatewayUrl/ui/"
+            text = "WebUI: $gatewayUrl/ui/ (已适配异形屏安全区)"
             setTextColor(Color.parseColor("#94A3B8"))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -1253,15 +1388,29 @@ class MainActivity : AppCompatActivity() {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             webChromeClient = WebChromeClient()
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    if (adminToken.isNotEmpty()) {
-                        val js = "try { localStorage.setItem('resin_admin_token', '$adminToken'); sessionStorage.setItem('resin_admin_token', '$adminToken'); } catch(e) {}"
-                        view?.evaluateJavascript(js, null)
-                    }
+                    val prof = adaptiveManager.currentProfile
+                    val safeBotDp = if (prof != null) (prof.safeBottomPx / prof.density).toInt() else 16
+                    val safeEdgeDp = if (prof != null) (prof.safeLeftPx / prof.density).toInt() else 0
+                    val js = """
+                        try {
+                            if ('$adminToken') {
+                                localStorage.setItem('resin_admin_token', '$adminToken');
+                                sessionStorage.setItem('resin_admin_token', '$adminToken');
+                            }
+                            document.documentElement.style.setProperty('--safe-bottom', '${safeBotDp}px');
+                            document.body.style.paddingBottom = '${safeBotDp}px';
+                            document.body.style.paddingLeft = '${safeEdgeDp}px';
+                            document.body.style.paddingRight = '${safeEdgeDp}px';
+                        } catch(e) {}
+                    """.trimIndent()
+                    view?.evaluateJavascript(js, null)
                 }
             }
             loadUrl("$gatewayUrl/ui/")
@@ -1364,9 +1513,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createColumn(): LinearLayout {
+        val prof = adaptiveManager.currentProfile
+        val hPad = if (prof?.isFoldableOrTablet == true) dp(24) else dp(12)
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(24))
+            setPadding(hPad, dp(12), hPad, dp(24))
         }
     }
 
