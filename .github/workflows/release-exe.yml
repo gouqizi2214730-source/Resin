@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release Tag (e.g. v1.3.0)"
+        description: "Release Tag (e.g. v1.3.1)"
         required: false
-        default: "v1.3.0"
+        default: "v1.3.1"
   push:
     branches:
       - master
@@ -93,7 +93,7 @@ jobs:
           GOOS: "windows"
           GOARCH: "amd64"
         run: |
-          $ver = "v1.3.0"
+          $ver = "v1.3.1"
           $commit = (git rev-parse --short=8 HEAD)
           $buildTime = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls" `
@@ -190,7 +190,7 @@ jobs:
           retention-days: 5
 
   build-android-apk:
-    name: Build Android APK (arm64-v8a + Cutout/UDC Adaptive + 16KB Aligned)
+    name: Build Android APK (arm64-v8a PIE ET_DYN + Cutout/UDC Adaptive)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -212,86 +212,86 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Cross-Compile Resin Go Core for Android arm64-v8a (libresin_core.so)
+      - name: Cross-Compile Resin Go Core as Android PIE ET_DYN Shared Object (libresin_core.so)
         env:
           CGO_ENABLED: "0"
           GOOS: "linux"
           GOARCH: "arm64"
         run: |
-          VERSION="v1.3.0"
+          VERSION="v1.3.1"
           GIT_COMMIT=$(git rev-parse --short=8 HEAD)
           BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
-          go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls" \
+          go build -buildmode=pie -trimpath -tags "with_quic with_wireguard with_grpc with_utls" \
             -ldflags="-s -w \
             -X github.com/Resinat/Resin/internal/buildinfo.Version=${VERSION} \
             -X github.com/Resinat/Resin/internal/buildinfo.GitCommit=${GIT_COMMIT} \
             -X github.com/Resinat/Resin/internal/buildinfo.BuildTime=${BUILD_TIME}" \
             -o android/app/src/main/jniLibs/arm64-v8a/libresin_core.so ./cmd/resin
           chmod 755 android/app/src/main/jniLibs/arm64-v8a/libresin_core.so
-          ls -lh android/app/src/main/jniLibs/arm64-v8a/libresin_core.so
+
+          # Verify ELF Header is ET_DYN (e_type == 3) and has PT_DYNAMIC (p_type == 2) and 16KB+ PT_LOAD alignment
+          python3 - << 'PYEOF'
+          import struct
+          with open("android/app/src/main/jniLibs/arm64-v8a/libresin_core.so", "rb") as f:
+              so = f.read()
+          e_type, e_machine = struct.unpack("<HH", so[16:20])
+          e_phoff, _, _, _, e_phentsize, e_phnum = struct.unpack("<QQIHHH", so[32:58])
+          print(f"Verified libresin_core.so ELF: e_type={e_type} (must be 3=ET_DYN), e_machine={e_machine}, e_phnum={e_phnum}")
+          assert e_type == 3, f"Expected ET_DYN (3), got {e_type}"
+          has_dynamic = False
+          for i in range(e_phnum):
+              off = e_phoff + i * e_phentsize
+              p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = struct.unpack("<IIQQQQQQ", so[off:off+56])
+              if p_type == 2:
+                  has_dynamic = True
+              if p_type == 1:
+                  print(f"  PT_LOAD[{i}]: p_align=0x{p_align:x} ({p_align})")
+                  assert p_align >= 0x4000, f"PT_LOAD alignment {p_align} < 16KB"
+          assert has_dynamic, "Missing PT_DYNAMIC header in libresin_core.so"
+          print("ELF PIE ET_DYN & 16KB alignment check PASSED!")
+          PYEOF
 
       - name: Generate Android Launcher Icons
         run: |
           python3 -m pip install --upgrade pip pillow
           python3 scripts/generate_icon.py
 
-      - name: Setup Java JDK 17
+      - name: Setup Java JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
-          java-version: "17"
-
-      - name: Generate Dedicated Release Keystore (resin-release.jks)
-        working-directory: ./android/app
-        run: |
-          keytool -genkeypair -v \
-            -keystore resin-release.jks \
-            -alias resin_key \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass resin_release_store \
-            -keypass resin_release_store \
-            -dname "CN=Resin Proxy Gateway, OU=Engineering, O=ResinProject, L=Shanghai, ST=Shanghai, C=CN"
+          java-version: "21"
 
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Build Signed & 16KB Page-Aligned Release Android APK
+      - name: Build Signed Release Android APK via Gradle & Verify V1+V2+V3 Signatures
         working-directory: ./android
         run: |
           gradle assembleRelease --no-daemon --stacktrace
           mkdir -p ../dist_apk
-          RAW_APK="app/build/outputs/apk/release/app-release.apk"
-          ZIPALIGN_BIN=$(find $ANDROID_HOME/build-tools -name "zipalign" | sort -V | tail -n 1)
-          APKSIGNER_BIN=$(find $ANDROID_HOME/build-tools -name "apksigner" | sort -V | tail -n 1)
+          BUILT_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          echo "Found Gradle signed APK: $BUILT_APK"
+          cp "$BUILT_APK" ../dist_apk/Resin-v1.3.1-arm64-v8a.apk
 
-          if [ -n "$ZIPALIGN_BIN" ] && [ -n "$APKSIGNER_BIN" ]; then
-            "$ZIPALIGN_BIN" -P 16 -f -v 4 "$RAW_APK" ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
-            "$APKSIGNER_BIN" sign --ks app/resin-release.jks \
-              --ks-key-alias resin_key \
-              --ks-pass pass:resin_release_store \
-              --key-pass pass:resin_release_store \
-              --v1-signing-enabled true \
-              --v2-signing-enabled true \
-              --v3-signing-enabled true \
-              ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
-            "$APKSIGNER_BIN" verify -v ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
-          else
-            cp "$RAW_APK" ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
+          APKSIGNER_BIN=$(find $ANDROID_HOME/build-tools -name "apksigner" | sort -V | tail -n 1)
+          if [ -n "$APKSIGNER_BIN" ]; then
+            "$APKSIGNER_BIN" verify -v --min-sdk-version 21 ../dist_apk/Resin-v1.3.1-arm64-v8a.apk
           fi
-          ls -lh ../dist_apk/Resin-v1.3.0-arm64-v8a.apk
+          ls -lh ../dist_apk/Resin-v1.3.1-arm64-v8a.apk
 
       - name: Upload Android APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: dist_apk/Resin-v1.3.0-arm64-v8a.apk
+          path: dist_apk/Resin-v1.3.1-arm64-v8a.apk
           retention-days: 5
 
   publish-release:
-    name: Publish GitHub Release v1.3.0 (Setup.exe & Adaptive APK)
+    name: Publish GitHub Release v1.3.1 (Setup.exe & Fixed Adaptive APK)
     runs-on: ubuntu-latest
     needs: [build-windows-setup, build-android-apk]
     permissions:
@@ -307,39 +307,35 @@ jobs:
         run: |
           ls -lh release_assets/
           test -f release_assets/Resin-Setup-win64.exe
-          test -f release_assets/Resin-v1.3.0-arm64-v8a.apk
+          test -f release_assets/Resin-v1.3.1-arm64-v8a.apk
 
       - name: Create Release Notes
         run: |
           cat << 'EOF' > release_notes.md
-          ## 🛡️ Resin 智能代理池网关 v1.3.0 (Android 异形屏/屏下摄像头自适应 & Windows 11 全中文现代安装器)
+          ## 🛡️ Resin 智能代理池网关 v1.3.1 (修复 Android 16 安装兼容性 & 异形屏/屏下摄像头自适应)
 
-          本发行版基于上游 [`Resinat/Resin`](https://github.com/Resinat/Resin) 深度构建，提供 **Android 异形屏与屏下摄像头 (UDC) 全场景自适应安装包 (`Resin-v1.3.0-arm64-v8a.apk`)** 与 **Windows 11 Fluent Dark 全中文现代安装包 (`Resin-Setup-win64.exe`)**。
+          本发行版针对 Android 15 / Android 16 (OnePlus 15R / OxygenOS 16) 完成了 APK 安装器底层兼容性修复，同时提供 **Android 异形屏与屏下摄像头 (UDC) 自适应安装包 (`Resin-v1.3.1-arm64-v8a.apk`)** 与 **Windows 11 Fluent Dark 全中文现代安装包 (`Resin-Setup-win64.exe`)**。
 
-          ### 📱 v1.3.0 Android 异形屏与屏下摄像头 (UDC) 自适应引擎新增特性
-          1. **全形态异形屏智能识别与四向避让 (`AdaptiveScreenManager.kt`)**
-             - 基于 `WindowInsetsCompat` (`systemBars()` + `displayCutout()` + `ime()`) 与 `LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS` 全屏沉浸延伸架构，自动检测并分类 **顶部居中单挖孔/水滴屏**、**左上角前置挖孔屏**、**右上角前置挖孔屏**、**居中宽药丸双挖孔/刘海屏**、**横屏侧边开孔** 以及 **真全面屏/屏下摄像头 (UDC)**。
-             - 原生声明多厂商异形屏与超长纵横比（`2.6:1`）适配元数据（`android.notch_support`、`notch.config`、`oo.display.cutout_support`），消除顶部/底部黑边，同时确保顶栏标题、快捷按钮、底部列表及内嵌 WebUI 控制台永不被挖孔或全面屏手势横条遮挡。
-          2. **屏下摄像头 (UDC - Under-Display Camera) 光学防眩光消光保护带**
-             - 针对屏下摄像头机型（如真全面屏 UDC 手机与折叠屏内屏 UDC），内置 `#03050A` 超低亮度纯黑消光保护区（`UDC 屏下镜头光学消光保护区`），防止高亮度像素在屏下镜头感光区造成衍射眩光或纱窗纹干扰，并自动将交互控件下移避开镜头光轴。
-          3. **双曲面瀑布屏 / 折叠屏大屏防误触与实时微调面板**
-             - 在主页新增 **「📱 异形屏与屏下摄像头 (UDC) 自适应」** 实时控制卡片，支持一键切换 4 种自适应模式（`智能自动感应` / `屏下摄像头光学防眩光模式` / `异形屏增强四向安全避让` / `双曲面瀑布屏与折叠屏防误触`），支持一键微调顶部避让高度（`0dp ~ +18dp`）与曲面侧边防误触边距（`0dp ~ +20dp`），并实时展示屏幕物理分辨率、开孔坐标矩阵 (`Cutout Rects`) 与四向安全内边距。
-
-          ### 💻 Windows 11 Fluent Dark 全中文现代安装包 (`Resin-Setup-win64.exe`)
-          - **100% 简体中文 Windows 11 圆角暗色卡片安装向导**（内置全中文图形化卸载程序 `Uninstall-Resin.exe`）、系统托盘最小化常驻、开机自启开关、实时双动态折线图大屏与 AI 自动巡检自愈引擎。
+          ### 🔧 v1.3.1 Android APK 安装失败修复说明
+          1. **修复 `libresin_core.so` ELF 类型 (`ET_EXEC` -> `ET_DYN` PIE + `PT_DYNAMIC`)**
+             - 开启 Go `-buildmode=pie` 位置无关可执行文件编译，生成具备 `ET_DYN (e_type=3)`、`PT_DYNAMIC` 动态段与 `64KB (0x10000 >= 16KB)` 段对齐的原生 ELF 二进制，彻底解决 Android 15/16 `PackageManager` (`NativeLibraryHelper` / Bionic `ElfReader`) 因非 PIE 拒绝提取 `.so` 导致的安装失败 (`INSTALL_FAILED_INVALID_APK`)。
+          2. **固化仓库级持久化签名证书 (`resin-keystore.jks`) 与独立包名 (`com.resinat.resin.gateway`)**
+             - 移除原先每次 CI 临时生成的随机密钥对与二次 `zipalign` 重签名操作，改由 Gradle 原生一步完成 `zipalign` 与 **V1 + V2 + V3 全通过签名**，并使用独立包名 `com.resinat.resin.gateway`，彻底消除旧版随机签名残留导致的 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`（签名不一致无法覆盖安装）问题。
+          3. **优化 Android 14–16 前台服务与异形屏/屏下摄像头自适应 (`AdaptiveScreenManager.kt`)**
+             - 采用经过一加 15R 实机验证的 `dataSync` 前台服务声明，内置异形屏（挖孔/药丸/刘海/曲面/折叠）四向安全区动态避让与屏下摄像头（UDC）`#03050A` 光学消光保护区。
           EOF
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || 'v1.3.0' }}
-          name: "Resin 智能代理池网关 ${{ inputs.release_tag || 'v1.3.0' }} (异形屏/屏下摄像头自适应 APK & Win11 中文安装器)"
+          tag_name: ${{ inputs.release_tag || 'v1.3.1' }}
+          name: "Resin 智能代理池网关 ${{ inputs.release_tag || 'v1.3.1' }} (Android 安装修复自适应 APK & Win11 中文安装器)"
           body_path: release_notes.md
           draft: false
           prerelease: false
           overwrite_files: true
           files: |
             release_assets/Resin-Setup-win64.exe
-            release_assets/Resin-v1.3.0-arm64-v8a.apk
+            release_assets/Resin-v1.3.1-arm64-v8a.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

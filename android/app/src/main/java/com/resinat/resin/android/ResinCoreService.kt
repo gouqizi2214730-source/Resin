@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -76,7 +77,16 @@ class ResinCoreService : Service() {
         val adminToken = prefs.getString("admin_token", "admin123") ?: "admin123"
         val proxyToken = prefs.getString("proxy_token", "my-token") ?: "my-token"
 
-        startForeground(NOTIFICATION_ID, buildNotification("本地 Resin 代理池网关运行中 (端口 $port)"))
+        val notification = buildNotification("本地 Resin 代理池网关运行中 (端口 $port)")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         startCoreEngine(port, adminToken, proxyToken)
         return START_STICKY
     }
@@ -119,7 +129,7 @@ class ResinCoreService : Service() {
                 env["RESIN_NODE_DNS_UPSTREAMS"] = "[\"tls://223.5.5.5?sni=dns.alidns.com\",\"https://1.1.1.1/dns-query\"]"
                 env["SSL_CERT_DIR"] = "/system/etc/security/cacerts:/apex/com.android.conscrypt/cacerts"
 
-                appendLog("正在启动内置 Resin Go 核心网关引擎 (端口: $port)...")
+                appendLog("正在启动内置 Resin Go 核心网关引擎 (PIE arm64-v8a, 端口: $port)...")
                 val proc = pb.start()
                 coreProcess = proc
 

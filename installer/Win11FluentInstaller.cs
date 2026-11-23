@@ -18,8 +18,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Resin 智能代理池网关 Windows 11 安装程序")]
 [assembly: AssemblyProduct("Resin 智能代理池网关")]
 [assembly: AssemblyCompany("Resin Project")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.3.1.0")]
+[assembly: AssemblyFileVersion("1.3.1.0")]
 
 namespace ResinWin11Installer
 {
@@ -88,7 +88,7 @@ namespace ResinWin11Installer
         [DllImport("user32.dll")]
         private static extern bool SetProcessDPIAware();
 
-        private const string AppVersion = "1.3.0";
+        private const string AppVersion = "1.3.1";
         private const string AppDisplayName = "Resin 智能代理池网关";
         private const string UninstallRegKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Resin";
         private const string AutorunRegKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
