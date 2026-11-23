@@ -1,6 +1,7 @@
 package com.resinat.resin.android
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -9,13 +10,13 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
-import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -23,6 +24,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -34,16 +36,17 @@ import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
-import java.net.InetSocketAddress
-import java.net.Proxy
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val REQ_CODE_VPN = 2261
+    }
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private lateinit var contentContainer: LinearLayout
@@ -53,6 +56,9 @@ class MainActivity : AppCompatActivity() {
     private var gatewayUrl = "http://127.0.0.1:2260"
     private var adminToken = "admin123"
     private var proxyToken = "my-token"
+    private var bootAutoStart = true
+    private var vpnAppMode = 0
+    private var vpnAppPackages = "com.android.chrome"
 
     // LLM Settings
     private var llmBaseUrl = "https://api.deepseek.com/v1"
@@ -61,6 +67,7 @@ class MainActivity : AppCompatActivity() {
 
     // Dashboard live views
     private var tvEngineStatus: TextView? = null
+    private var tvVpnStatus: TextView? = null
     private var tvMetricsSummary: TextView? = null
     private var tvCoreLogs: TextView? = null
     private var webViewInstance: WebView? = null
@@ -77,6 +84,16 @@ class MainActivity : AppCompatActivity() {
                 }
                 tvEngineStatus?.setTextColor(
                     if (running) Color.parseColor("#10B981") else Color.parseColor("#F59E0B")
+                )
+
+                val vpnOn = ResinVpnService.isVpnActive()
+                tvVpnStatus?.text = if (vpnOn) {
+                    "🟢 VPN 透明代理隧道: 已开启 (流量已导向 Resin 网关)"
+                } else {
+                    "⚪ VPN 透明代理隧道: 未开启"
+                }
+                tvVpnStatus?.setTextColor(
+                    if (vpnOn) Color.parseColor("#10B981") else Color.parseColor("#94A3B8")
                 )
             }
             uiHandler.postDelayed(this, 2500)
@@ -110,16 +127,24 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val tvTitle = TextView(this).apply {
-            text = "🛡️ Resin 智能代理池网关 v1.1.0"
+            text = "🛡️ Resin 智能代理池网关 v1.2.0"
             setTextColor(Color.parseColor("#38BDF8"))
-            textSize = 18f
+            textSize = 17.5f
             setTypeface(typeface, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val btnQuickStart = createButton("▶ 启动本地引擎", "#059669") {
+        val btnQuickHeal = createButton("🩺 AI 自愈", "#0284C7") {
+            runAiAutoHealPatrol()
+        }.apply {
+            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp.rightMargin = dp(6)
+            layoutParams = lp
+        }
+        val btnQuickStart = createButton("▶ 启动引擎", "#059669") {
             startLocalEngine()
         }
         titleRow.addView(tvTitle)
+        titleRow.addView(btnQuickHeal)
         titleRow.addView(btnQuickStart)
         header.addView(titleRow)
 
@@ -132,11 +157,11 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
         }
         val tabs = listOf(
-            "🚀 总览与引擎",
+            "🚀 总览与VPN接管",
             "📡 订阅与节点",
             "🎯 平台与租约",
             "🔌 接入点与日志",
-            "🤖 AI与数据源",
+            "🤖 AI自愈与数据源",
             "🌐 Web控制台"
         )
         val tabButtons = mutableListOf<Button>()
@@ -175,7 +200,6 @@ class MainActivity : AppCompatActivity() {
 
         switchTab(0)
         uiHandler.post(logRefreshRunnable)
-        // Auto-start local engine on first launch
         startLocalEngine()
     }
 
@@ -184,6 +208,9 @@ class MainActivity : AppCompatActivity() {
         gatewayUrl = prefs.getString("gateway_url", "http://127.0.0.1:2260") ?: "http://127.0.0.1:2260"
         adminToken = prefs.getString("admin_token", "admin123") ?: "admin123"
         proxyToken = prefs.getString("proxy_token", "my-token") ?: "my-token"
+        bootAutoStart = prefs.getBoolean("boot_auto_start", true)
+        vpnAppMode = prefs.getInt("vpn_app_mode", 0)
+        vpnAppPackages = prefs.getString("vpn_app_packages", "com.android.chrome") ?: "com.android.chrome"
         llmBaseUrl = prefs.getString("llm_base_url", "https://api.deepseek.com/v1") ?: "https://api.deepseek.com/v1"
         llmModel = prefs.getString("llm_model", "deepseek-chat") ?: "deepseek-chat"
         llmApiKey = prefs.getString("llm_api_key", "") ?: ""
@@ -196,6 +223,9 @@ class MainActivity : AppCompatActivity() {
             .putString("port", port)
             .putString("admin_token", adminToken)
             .putString("proxy_token", proxyToken)
+            .putBoolean("boot_auto_start", bootAutoStart)
+            .putInt("vpn_app_mode", vpnAppMode)
+            .putString("vpn_app_packages", vpnAppPackages)
             .putString("llm_base_url", llmBaseUrl)
             .putString("llm_model", llmModel)
             .putString("llm_api_key", llmApiKey)
@@ -225,6 +255,94 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "已发送停止本地引擎指令", Toast.LENGTH_SHORT).show()
     }
 
+    private fun startVpnTakeover() {
+        val uri = Uri.parse(gatewayUrl)
+        val port = if (uri.port > 0) uri.port.toString() else "2260"
+        savePrefs(port)
+        val prepIntent = VpnService.prepare(this)
+        if (prepIntent != null) {
+            @Suppress("DEPRECATION")
+            startActivityForResult(prepIntent, REQ_CODE_VPN)
+        } else {
+            onActivityResult(REQ_CODE_VPN, Activity.RESULT_OK, null)
+        }
+    }
+
+    private fun stopVpnTakeover() {
+        val svcIntent = Intent(this, ResinVpnService::class.java).apply {
+            action = ResinVpnService.ACTION_VPN_STOP
+        }
+        startService(svcIntent)
+        Toast.makeText(this, "已关闭 VPN 透明代理接管", Toast.LENGTH_SHORT).show()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_CODE_VPN && resultCode == Activity.RESULT_OK) {
+            val svcIntent = Intent(this, ResinVpnService::class.java).apply {
+                action = ResinVpnService.ACTION_VPN_START
+            }
+            startService(svcIntent)
+            Toast.makeText(this, "已开启 Android VPN 透明代理接管", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun runAiAutoHealPatrol() {
+        Toast.makeText(this, "🩺 正在执行 AI 节点池巡检与熔断节点自愈...", Toast.LENGTH_SHORT).show()
+        Thread {
+            val actions = mutableListOf<String>()
+            val (okS, subsRaw) = apiRequest("GET", "/api/v1/subscriptions?limit=100&offset=0")
+            if (okS) {
+                try {
+                    val items = JSONObject(subsRaw).optJSONArray("items") ?: JSONArray()
+                    for (i in 0 until items.length()) {
+                        val s = items.getJSONObject(i)
+                        if (!s.optBoolean("enabled", true)) continue
+                        val sid = s.optString("id")
+                        val sname = s.optString("name", sid)
+                        val total = s.optInt("node_count", 0)
+                        val healthy = s.optInt("healthy_node_count", 0)
+                        if (total > 0 && healthy < total) {
+                            val (okC, cRaw) = apiRequest("POST", "/api/v1/subscriptions/$sid/actions/cleanup-circuit-open-nodes", "{}")
+                            if (okC) {
+                                val cleaned = JSONObject(cRaw).optInt("cleaned_count", 0)
+                                if (cleaned > 0) actions.add("清理[$sname]熔断节点 ${cleaned}个")
+                            }
+                        }
+                        if (total == 0 || (total > 0 && healthy.toDouble() / total < 0.4)) {
+                            apiRequest("POST", "/api/v1/subscriptions/$sid/actions/refresh", "{}")
+                            actions.add("刷新低健康率订阅[$sname]")
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            val (okN, nodesRaw) = apiRequest("GET", "/api/v1/nodes?limit=10&offset=0&circuit_open=true")
+            if (okN) {
+                try {
+                    val items = JSONObject(nodesRaw).optJSONArray("items") ?: JSONArray()
+                    var probed = 0
+                    for (i in 0 until minOf(4, items.length())) {
+                        val nh = items.getJSONObject(i).optString("node_hash")
+                        if (nh.isNotEmpty()) {
+                            apiRequest("POST", "/api/v1/nodes/$nh/actions/probe-latency", "{}")
+                            probed++
+                        }
+                    }
+                    if (probed > 0) actions.add("主动探测恢复 $probed 个熔断节点")
+                } catch (_: Exception) {}
+            }
+
+            val summary = if (actions.isEmpty()) "AI 巡检通过：节点池运行健康，无需自愈操作" else "AI 自愈完成：" + actions.joinToString("；")
+            ResinCoreService.appendLog(summary)
+            uiHandler.post {
+                Toast.makeText(this, summary, Toast.LENGTH_LONG).show()
+                refreshDashboardMetrics()
+            }
+        }.start()
+    }
+
     private fun switchTab(index: Int) {
         contentContainer.removeAllViews()
         when (index) {
@@ -238,22 +356,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // Tab 0: 总览与本地引擎控制
+    // Tab 0: 总览、本地引擎、开机自启与 VpnService 分应用透明接管
     // =========================================================================
     private fun buildDashboardTab() {
         val scroll = ScrollView(this)
         val col = createColumn()
 
-        // 1. Engine & Connection Card
-        val engineCard = createCard("⚙️ 本地网关引擎与远程连接配置")
+        // 1. Engine & Boot Auto-Start Card
+        val engineCard = createCard("⚙️ 本地网关引擎、开机自启与远程连接配置")
         tvEngineStatus = TextView(this).apply {
             text = "● 正在检测本地 Resin 核心引擎状态..."
             setTextColor(Color.parseColor("#10B981"))
             textSize = 14f
             setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(6))
         }
         engineCard.addView(tvEngineStatus)
+
+        val chkBoot = CheckBox(this).apply {
+            text = "手机开机自动启动本地 Resin 网关引擎 (BOOT_COMPLETED)"
+            setTextColor(Color.parseColor("#E2E8F0"))
+            isChecked = bootAutoStart
+            setOnCheckedChangeListener { _, isChecked ->
+                bootAutoStart = isChecked
+                savePrefs()
+                Toast.makeText(
+                    this@MainActivity,
+                    if (isChecked) "已开启手机开机自动启动网关" else "已关闭开机自启",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+        engineCard.addView(chkBoot)
 
         val inpUrl = createInput(gatewayUrl, "Resin 网关地址 (本地默认 http://127.0.0.1:2260)")
         val inpAdmin = createInput(adminToken, "管理后台密码 RESIN_ADMIN_TOKEN")
@@ -278,7 +412,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "配置已保存并刷新", Toast.LENGTH_SHORT).show()
         }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) } })
 
-        btnRow.addView(createButton("▶ 启动/重启本地引擎", "#059669") {
+        btnRow.addView(createButton("▶ 启动/重启引擎", "#059669") {
             gatewayUrl = inpUrl.text.toString().trim().removeSuffix("/")
             adminToken = inpAdmin.text.toString().trim()
             proxyToken = inpProxy.text.toString().trim()
@@ -292,7 +426,54 @@ class MainActivity : AppCompatActivity() {
         engineCard.addView(btnRow)
         col.addView(engineCard)
 
-        // 2. Live Metrics Snapshot Card
+        // 2. Android VpnService Per-App Transparent Proxy Card
+        val vpnCard = createCard("🛡️ Android VPN 全局 / 分应用透明代理接管 (免 Root)")
+        tvVpnStatus = TextView(this).apply {
+            text = if (ResinVpnService.isVpnActive()) "🟢 VPN 透明代理隧道: 已开启" else "⚪ VPN 透明代理隧道: 未开启"
+            setTextColor(if (ResinVpnService.isVpnActive()) Color.parseColor("#10B981") else Color.parseColor("#94A3B8"))
+            textSize = 13.5f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, 0, 0, dp(6))
+        }
+        vpnCard.addView(tvVpnStatus)
+
+        val spnVpnMode = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf(
+                    "全局透明接管模式 (自动排除 Resin 自身防回环)",
+                    "分应用白名单模式 (仅下方指定包名应用走 Resin)",
+                    "分应用黑名单模式 (排除下方指定包名应用直连)"
+                )
+            )
+            setSelection(vpnAppMode.coerceIn(0, 2))
+            setBackgroundColor(Color.parseColor("#0F172A"))
+        }
+        val inpVpnPkgs = createInput(vpnAppPackages, "分应用包名列表 (逗号分隔，如 com.android.chrome, com.termux)")
+        vpnCard.addView(createLabel("流量接管模式:"))
+        vpnCard.addView(spnVpnMode)
+        vpnCard.addView(createLabel("指定应用包名 (白名单/黑名单模式生效):"))
+        vpnCard.addView(inpVpnPkgs)
+
+        val vpnBtnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        vpnBtnRow.addView(createButton("⚡ 开启 VPN 透明代理接管", "#059669") {
+            vpnAppMode = spnVpnMode.selectedItemPosition
+            vpnAppPackages = inpVpnPkgs.text.toString().trim()
+            savePrefs()
+            startVpnTakeover()
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) } })
+
+        vpnBtnRow.addView(createButton("■ 关闭 VPN 接管", "#DC2626") {
+            stopVpnTakeover()
+        })
+        vpnCard.addView(vpnBtnRow)
+        col.addView(vpnCard)
+
+        // 3. Live Metrics Snapshot Card
         val metricCard = createCard("📊 节点池健康快照与实时指标")
         tvMetricsSummary = TextView(this).apply {
             text = "正在拉取 Resin 节点池实时指标..."
@@ -301,16 +482,22 @@ class MainActivity : AppCompatActivity() {
             setLineSpacing(dp(4).toFloat(), 1.0f)
         }
         metricCard.addView(tvMetricsSummary)
-        metricCard.addView(createButton("🔄 立即刷新监控指标", "#334155") {
+
+        val metricBtnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        metricBtnRow.addView(createButton("🔄 刷新监控指标", "#334155") {
             refreshDashboardMetrics()
-        }.apply {
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.topMargin = dp(8)
-            layoutParams = lp
-        })
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) } })
+
+        metricBtnRow.addView(createButton("🩺 AI 巡检与自愈", "#0284C7") {
+            runAiAutoHealPatrol()
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) })
+        metricCard.addView(metricBtnRow)
         col.addView(metricCard)
 
-        // 3. Quick Copy & Sticky Proxy Workshop
+        // 4. Quick Copy & Sticky Proxy Workshop
         val proxyCard = createCard("⚡ 粘性代理一键复制与连通性实测")
         val inpTestPlat = createInput("Default", "平台名 Platform")
         val inpTestAcc = createInput("mobile_user_01", "业务粘性账号 Account")
@@ -357,8 +544,8 @@ class MainActivity : AppCompatActivity() {
         proxyCard.addView(tvTestResult)
         col.addView(proxyCard)
 
-        // 4. Core Engine Live Console Logs
-        val logCard = createCard("🖥️ 本地 Resin 核心引擎实时运行日志")
+        // 5. Core Engine Live Console Logs
+        val logCard = createCard("🖥️ 本地 Resin 核心引擎与 AI 自愈实时日志")
         tvCoreLogs = createMonoBox(ResinCoreService.getLogsText())
         logCard.addView(tvCoreLogs)
         col.addView(logCard)
@@ -381,7 +568,7 @@ class MainActivity : AppCompatActivity() {
             if (okInfo) {
                 try {
                     val info = JSONObject(infoRaw)
-                    sb.append("核心版本: ").append(info.optString("version", "v1.1.0"))
+                    sb.append("核心版本: ").append(info.optString("version", "v1.2.0"))
                         .append(" (Commit: ").append(info.optString("git_commit", "-")).append(")\n")
                 } catch (_: Exception) {}
             }
@@ -424,11 +611,10 @@ class MainActivity : AppCompatActivity() {
         val scroll = ScrollView(this)
         val col = createColumn()
 
-        // Create subscription card
         val addSubCard = createCard("➕ 添加代理节点订阅 (远程 URL 或本地粘贴节点)")
-        val inpSubName = createInput("", "订阅名称 (例如: 主力机场 / 静态住宅池)")
+        val inpSubName = createInput("", "订阅名称 (例如: 主力专线 / 静态住宅池)")
         val inpSubUrl = createInput("", "远程订阅 URL (http:// 或 https://，本地订阅可留空)")
-        val inpSubContent = createInput("", "本地节点内容 (vmess/vless/ss/hy2/socks5/Clash/Sing-box，远程可留空)").apply {
+        val inpSubContent = createInput("", "本地节点内容 (URI行/IP:PORT/Clash/Sing-box，远程可留空)").apply {
             minLines = 3
             maxLines = 6
             isSingleLine = false
@@ -490,7 +676,6 @@ class MainActivity : AppCompatActivity() {
         })
         col.addView(addSubCard)
 
-        // Subscription list & actions
         val subListCard = createCard("📡 已配置订阅源列表与一键刷新/清理")
         val inpTargetSubId = createInput("", "输入或粘贴订阅 ID 执行刷新 / 清理熔断 / 删除")
         val subBtnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -525,7 +710,6 @@ class MainActivity : AppCompatActivity() {
         subListCard.addView(tvSubsList)
         col.addView(subListCard)
 
-        // Nodes pool & active probe card
         val nodeCard = createCard("🌐 全局节点池检索与主动出口/延迟探测")
         val inpNodeFilter = createInput("", "按标签关键字或地区筛选 (如: 香港, hk, us)")
         val inpNodeHash = createInput("", "输入节点 Hash 执行同步出口 IP 探测 / 权威延迟探测")
@@ -685,7 +869,6 @@ class MainActivity : AppCompatActivity() {
         platCard.addView(tvPlats)
         col.addView(platCard)
 
-        // Leases & Inheritance
         val leaseCard = createCard("🔗 活跃账号粘性租约、出口 IP 负载与租约继承")
         val inpLeasePlatId = createInput("", "平台 ID (留空默认查询第一个平台 Default)")
         val inpParentAcc = createInput("", "父账号 (Parent Account)")
@@ -782,7 +965,6 @@ class MainActivity : AppCompatActivity() {
         val scroll = ScrollView(this)
         val col = createColumn()
 
-        // 1. Endpoints
         val epCard = createCard("🔌 多接入点端口管理 (/api/v1/endpoints)")
         val inpNewPort = createInput("2300", "新监听端口号 (1-65535)").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
@@ -811,7 +993,6 @@ class MainActivity : AppCompatActivity() {
         epCard.addView(tvEndpoints)
         col.addView(epCard)
 
-        // 2. Account Header Rules
         val ruleCard = createCard("📑 请求头账号提取规则 (/api/v1/account-header-rules)")
         val inpPrefix = createInput("api.openai.com/v1", "URL 前缀 (如 api.openai.com/v1)")
         val inpHeaders = createInput("Authorization,x-api-key", "提取请求头列表 (逗号分隔)")
@@ -832,7 +1013,6 @@ class MainActivity : AppCompatActivity() {
         ruleCard.addView(tvRules)
         col.addView(ruleCard)
 
-        // 3. Request Logs & GeoIP
         val logCard = createCard("📜 最近结构化请求日志 & GeoIP 查询")
         val inpGeoIp = createInput("1.1.1.1", "输入 IP 查询 GeoIP 国家/地区代码")
         val tvReqLogs = createMonoBox("正在加载最近请求日志...")
@@ -922,18 +1102,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // Tab 4: AI 智能代理助手、数据源 API 中心与自动更新
+    // Tab 4: AI 智能代理助手、自动巡检自愈、数据源 API 中心与自动更新
     // =========================================================================
     private fun buildAiAndDataSourcesTab() {
         val scroll = ScrollView(this)
         val col = createColumn()
 
-        val aiCard = createCard("🤖 大模型 API 配置与 Resin AI 规则/代码生成助手")
+        val aiCard = createCard("🤖 大模型 API 配置、AI 节点池自愈与规则生成助手")
         val inpBase = createInput(llmBaseUrl, "API Base URL (支持 DeepSeek/通义千问/OpenAI/局域网 Ollama)")
         val inpMod = createInput(llmModel, "模型名称 (如 deepseek-chat, qwen-plus, qwen2.5:7b)")
         val inpKey = createInput(llmApiKey, "API Key (本地 Ollama/LM Studio 可留空)")
         val inpPrompt = createInput("请帮我编写筛选香港、新加坡、日本低延迟专线节点并排除过期节点的 Resin Platform 正则过滤规则。", "输入 AI 提问...")
-        val tvAiOut = createMonoBox("点击下方按钮生成 Platform 过滤规则、业务接入代码或诊断报告...")
+        val tvAiOut = createMonoBox("点击下方按钮执行 AI 节点池自愈巡检、生成 Platform 过滤规则或业务接入代码...")
 
         aiCard.addView(createLabel("大模型 API Base URL:"))
         aiCard.addView(inpBase)
@@ -944,7 +1124,11 @@ class MainActivity : AppCompatActivity() {
         aiCard.addView(createLabel("向 Resin AI 助手提问:"))
         aiCard.addView(inpPrompt)
 
-        aiCard.addView(createButton("✨ 发送提问 / 生成规则与接入代码", "#059669") {
+        val aiBtnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        aiBtnRow.addView(createButton("✨ 发送提问 / 生成规则", "#059669") {
             llmBaseUrl = inpBase.text.toString().trim().removeSuffix("/")
             llmModel = inpMod.text.toString().trim()
             llmApiKey = inpKey.text.toString().trim()
@@ -955,16 +1139,15 @@ class MainActivity : AppCompatActivity() {
                 val ans = callLlmOrFallback(q)
                 uiHandler.post { tvAiOut.text = ans }
             }.start()
-        }.apply {
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.topMargin = dp(8)
-            lp.bottomMargin = dp(8)
-            layoutParams = lp
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) } })
+
+        aiBtnRow.addView(createButton("🩺 AI 自愈巡检", "#0284C7") {
+            runAiAutoHealPatrol()
         })
+        aiCard.addView(aiBtnRow)
         aiCard.addView(tvAiOut)
         col.addView(aiCard)
 
-        // Data Sources Connectivity & Release Update Check
         val dsCard = createCard("🗄️ 数据源 API 连通性中心 & GitHub Release 更新检查")
         val tvDsOut = createMonoBox(
             "内置数据源清单:\n" +
@@ -1013,10 +1196,10 @@ class MainActivity : AppCompatActivity() {
                     conn.setRequestProperty("User-Agent", "Mozilla/5.0 (compatible; Google-Agent; +https://developers.google.com/crawling/docs/crawlers-fetchers/google-agent)")
                     val raw = conn.inputStream.bufferedReader().readText()
                     val rel = JSONObject(raw)
-                    val tag = rel.optString("tag_name", "v1.1.0")
+                    val tag = rel.optString("tag_name", "v1.2.0")
                     val htmlUrl = rel.optString("html_url", "https://github.com/gouqizi2214730-source/Resin/releases")
                     uiHandler.post {
-                        tvDsOut.text = "最新 GitHub Release: $tag\n当前版本: v1.1.0\n发布页面: $htmlUrl"
+                        tvDsOut.text = "最新 GitHub Release: $tag\n当前版本: v1.2.0\n发布页面: $htmlUrl"
                     }
                 } catch (e: Exception) {
                     uiHandler.post { tvDsOut.text = "检查更新异常: ${e.message}" }

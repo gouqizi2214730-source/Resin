@@ -1,4 +1,4 @@
-"""Resin 核心引擎进程管理器与全功能 Control Plane API 客户端 (100% 覆盖 Resin 所有 REST 接口)."""
+"""Resin 核心引擎进程管理器、AI 自动巡检自愈守护线程与全功能 Control Plane API 客户端."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 class ResinCoreProcessManager:
-    """管理内置 resin-core.exe 守护进程、.env 配置持久化与 Windows 系统代理设置."""
+    """管理内置 resin-core.exe 守护进程、.env 配置持久化、开机自启与 Windows 系统代理设置."""
 
     def __init__(self, app_dir: Optional[Path] = None, data_dir: Optional[Path] = None) -> None:
         if app_dir is None:
@@ -59,7 +59,6 @@ class ResinCoreProcessManager:
         ]
         for c in candidates:
             if c.exists() and c.is_file():
-                # Avoid matching the PyInstaller GUI launcher itself if named Resin.exe
                 if c.name.lower() == "resin.exe" and getattr(sys, "frozen", False):
                     if c.resolve() == Path(sys.executable).resolve():
                         continue
@@ -207,6 +206,41 @@ class ResinCoreProcessManager:
             return True, state_str
         except Exception as exc:
             return False, f"修改系统代理注册表失败: {exc}"
+
+    @staticmethod
+    def is_windows_startup_enabled() -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            import winreg
+
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
+                val, _ = winreg.QueryValueEx(key, "ResinProxyGateway")
+                return bool(val)
+        except Exception:
+            return False
+
+    def set_windows_startup(self, enable: bool) -> Tuple[bool, str]:
+        if sys.platform != "win32":
+            return False, "开机自启注册表配置仅在 Windows 系统上受支持"
+        try:
+            import winreg
+
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            exe_path = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else (self.app_dir / "Resin.exe")
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+                if enable:
+                    winreg.SetValueEx(key, "ResinProxyGateway", 0, winreg.REG_SZ, f'"{exe_path}" --minimized')
+                    return True, "已开启 Windows 开机自动启动（开机后静默驻留系统托盘）"
+                else:
+                    try:
+                        winreg.DeleteValue(key, "ResinProxyGateway")
+                    except FileNotFoundError:
+                        pass
+                    return True, "已关闭 Windows 开机自动启动"
+        except Exception as exc:
+            return False, f"配置开机自启失败: {exc}"
 
 
 class ResinAPIClient:
@@ -484,7 +518,7 @@ class ResinAPIClient:
     # ---- 11. Proxy Connectivity & Sticky Session Tester ----
     def test_proxy_connection(
         self,
-        mode: str = "http_forward",  # "http_forward" | "reverse_url" | "reverse_header"
+        mode: str = "http_forward",
         platform_name: str = "Default",
         account: str = "test_user_01",
         target_url: str = "https://api.ipify.org?format=json",
@@ -549,3 +583,117 @@ class ResinAPIClient:
                 "latency_ms": round((time.time() - t0) * 1000, 1),
                 "response": f"代理请求失败: {exc}",
             }
+
+
+class AutoHealWatchdog:
+    """AI 自动巡检与节点池故障自愈守护引擎."""
+
+    def __init__(
+        self,
+        api_client: ResinAPIClient,
+        core_mgr: Optional[ResinCoreProcessManager] = None,
+        interval_sec: int = 180,
+        min_healthy_ratio: float = 0.4,
+    ) -> None:
+        self.api = api_client
+        self.core_mgr = core_mgr
+        self.interval_sec = interval_sec
+        self.min_healthy_ratio = min_healthy_ratio
+        self.enabled: bool = True
+        self.history: Deque[str] = collections.deque(maxlen=150)
+        self._stop_evt = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_evt.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+
+    def _loop(self) -> None:
+        while not self._stop_evt.wait(self.interval_sec):
+            if self.enabled:
+                self.run_patrol_once()
+
+    def run_patrol_once(self) -> Dict[str, Any]:
+        ts = time.strftime("%H:%M:%S")
+        actions_taken: List[str] = []
+
+        ok_h, _ = self.api.healthz()
+        if not ok_h:
+            if self.core_mgr and self.core_mgr.find_core_binary() and not self.core_mgr.is_running():
+                started, msg = self.core_mgr.start()
+                actions_taken.append(f"检测到本地核心未运行，已自动拉起: {msg}")
+            else:
+                msg = f"[{ts}] 巡检跳过: 控制面未连接"
+                self.history.append(msg)
+                return {"ok": False, "actions": actions_taken, "summary": msg}
+
+        ok_s, subs_data = self.api.list_subscriptions()
+        cleaned_total = 0
+        refreshed_subs = 0
+        if ok_s and isinstance(subs_data, dict):
+            for s in subs_data.get("items", []):
+                if not s.get("enabled"):
+                    continue
+                sid = s.get("id", "")
+                sname = s.get("name", sid)
+                total_n = int(s.get("node_count", 0))
+                healthy_n = int(s.get("healthy_node_count", 0))
+                ratio = (healthy_n / total_n) if total_n > 0 else 1.0
+
+                if total_n > 0 and healthy_n < total_n:
+                    ok_c, c_res = self.api.cleanup_subscription_circuit_open(sid)
+                    if ok_c and isinstance(c_res, dict) and c_res.get("cleaned_count", 0) > 0:
+                        cnt = c_res["cleaned_count"]
+                        cleaned_total += cnt
+                        actions_taken.append(f"订阅「{sname}」自动清理熔断节点 {cnt} 个")
+
+                if total_n == 0 or ratio < self.min_healthy_ratio:
+                    self.api.refresh_subscription(sid)
+                    refreshed_subs += 1
+                    actions_taken.append(f"订阅「{sname}」健康率 ({ratio*100:.0f}%) 低于阈值，已触发自动同步刷新")
+
+        ok_n, nodes_data = self.api.list_nodes({"circuit_open": "true"})
+        probed_nodes = 0
+        if ok_n and isinstance(nodes_data, dict):
+            for n in (nodes_data.get("items") or [])[:5]:
+                nh = n.get("node_hash", "")
+                if nh:
+                    self.api.probe_node_latency(nh)
+                    probed_nodes += 1
+            if probed_nodes > 0:
+                actions_taken.append(f"已对 {probed_nodes} 个熔断节点发起主动延迟恢复探测")
+
+        ok_p, plats_data = self.api.list_platforms()
+        if ok_p and isinstance(plats_data, dict) and (cleaned_total > 0 or refreshed_subs > 0 or probed_nodes > 0):
+            for p in plats_data.get("items", []):
+                pid = p.get("id", "")
+                if pid:
+                    self.api.rebuild_platform_view(pid)
+            actions_taken.append("已自动重建全部 Platform 可路由隔离池视图")
+
+        _, snap = self.api.get_snapshot_node_pool()
+        snap_info = ""
+        if isinstance(snap, dict):
+            snap_info = f"总节点={snap.get('total_nodes', 0)}, 健康={snap.get('healthy_nodes', 0)}, 独立IP={snap.get('egress_ip_count', 0)}"
+
+        if not actions_taken:
+            summary = f"[{ts}] AI 巡检通过: 节点池健康稳定 ({snap_info})，无需自愈操作。"
+        else:
+            summary = f"[{ts}] AI 自愈完成 ({snap_info}): " + "；".join(actions_taken)
+
+        self.history.append(summary)
+        if self.core_mgr:
+            self.core_mgr.log_buffer.append(summary)
+        return {
+            "ok": True,
+            "timestamp": ts,
+            "actions": actions_taken,
+            "summary": summary,
+            "history": list(self.history),
+        }

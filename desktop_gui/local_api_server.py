@@ -9,13 +9,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
 from . import __app_name__, __version__
-from .core_manager import ResinAPIClient, ResinCoreProcessManager
+from .core_manager import AutoHealWatchdog, ResinAPIClient, ResinCoreProcessManager
 from .data_sources import DataSourceManager
 from .llm_providers import LLMProviderManager
 
 
 class LocalGatewayHTTPServer:
-    """在后台守护线程中暴露 /health, /v1/models, /v1/chat/completions, /api/providers, /api/datasources, /api/resin/status."""
+    """在后台守护线程中暴露 /health, /v1/models, /v1/chat/completions, /api/providers, /api/datasources, /api/resin/status, /api/resin/auto-heal."""
 
     def __init__(
         self,
@@ -23,6 +23,7 @@ class LocalGatewayHTTPServer:
         ds_mgr: DataSourceManager,
         core_mgr: Optional[ResinCoreProcessManager] = None,
         api_client: Optional[ResinAPIClient] = None,
+        watchdog: Optional[AutoHealWatchdog] = None,
         host: str = "127.0.0.1",
         port: int = 8787,
     ) -> None:
@@ -30,6 +31,7 @@ class LocalGatewayHTTPServer:
         self.ds_mgr = ds_mgr
         self.core_mgr = core_mgr
         self.api_client = api_client
+        self.watchdog = watchdog
         self.host = host
         self.port = port
         self._server: Optional[ThreadingHTTPServer] = None
@@ -43,7 +45,7 @@ class LocalGatewayHTTPServer:
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: Any) -> None:
-                return  # Silent background daemon logging
+                return
 
             def _send_json(self, code: int, payload: Any) -> None:
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -71,6 +73,7 @@ class LocalGatewayHTTPServer:
                             "app": __app_name__,
                             "version": __version__,
                             "resin_core_running": core_running,
+                            "auto_heal_enabled": outer.watchdog.enabled if outer.watchdog else False,
                             "timestamp": int(time.time()),
                         },
                     )
@@ -99,7 +102,10 @@ class LocalGatewayHTTPServer:
                     return
 
                 if self.path == "/api/resin/status":
-                    status_data = {"core_process_running": outer.core_mgr.is_running() if outer.core_mgr else False}
+                    status_data = {
+                        "core_process_running": outer.core_mgr.is_running() if outer.core_mgr else False,
+                        "auto_heal_history": list(outer.watchdog.history) if outer.watchdog else [],
+                    }
                     if outer.api_client:
                         ok, snap = outer.api_client.get_snapshot_node_pool()
                         status_data["control_plane_reachable"] = ok
@@ -110,6 +116,14 @@ class LocalGatewayHTTPServer:
                 self._send_json(404, {"error": "Not Found", "path": self.path})
 
             def do_POST(self) -> None:
+                if self.path == "/api/resin/auto-heal":
+                    if outer.watchdog:
+                        res = outer.watchdog.run_patrol_once()
+                        self._send_json(200, res)
+                    else:
+                        self._send_json(503, {"ok": False, "message": "AutoHealWatchdog not initialized"})
+                    return
+
                 if self.path == "/v1/chat/completions":
                     length = int(self.headers.get("Content-Length", "0"))
                     raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"

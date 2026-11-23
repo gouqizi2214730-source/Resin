@@ -1,7 +1,8 @@
-"""Resin 纯原生现代中文桌面端 GUI (PySide6 / Qt 6, 100% 覆盖 Resin 全部功能模块)."""
+"""Resin 纯原生现代中文桌面端 GUI v1.2.0 (PySide6 / Qt 6, 含系统托盘常驻、开机自启、实时动态折线图与 AI 自动巡检自愈)."""
 
 from __future__ import annotations
 
+import collections
 import ctypes
 import json
 import os
@@ -9,10 +10,20 @@ import sys
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QAction, QColor, QFont, QIcon
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal, QObject
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QFont,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,13 +37,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QSplitter,
     QSystemTrayIcon,
-    QMenu,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -41,7 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import __app_name__, __version__
-from .core_manager import ResinAPIClient, ResinCoreProcessManager
+from .core_manager import AutoHealWatchdog, ResinAPIClient, ResinCoreProcessManager
 from .data_sources import DataSourceManager
 from .llm_providers import LLMProviderManager
 from .updater import AutoUpdater
@@ -196,7 +207,7 @@ def enable_windows_hidpi_and_app_id() -> None:
         except Exception:
             pass
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Resin.ProxyGateway.Desktop.1.1")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Resin.ProxyGateway.Desktop.1.2")
     except Exception:
         pass
 
@@ -215,6 +226,134 @@ def resolve_app_icon_path() -> Optional[Path]:
             if p.exists():
                 return p
     return None
+
+
+class RealtimeLineChartWidget(QWidget):
+    """硬件加速 QPainter 实时双序列动态折线图组件 (带渐变面积填充与网格坐标)."""
+
+    def __init__(
+        self,
+        title: str = "实时吞吐速率趋势 (KB/s)",
+        series1_name: str = "下行速率 (Egress)",
+        series2_name: str = "上行速率 (Ingress)",
+        color1: str = "#38BDF8",
+        color2: str = "#10B981",
+        unit: str = "KB/s",
+        max_points: int = 45,
+    ) -> None:
+        super().__init__()
+        self.title = title
+        self.series1_name = series1_name
+        self.series2_name = series2_name
+        self.color1 = QColor(color1)
+        self.color2 = QColor(color2)
+        self.unit = unit
+        self.max_points = max_points
+        self.series1: Deque[float] = collections.deque([0.0] * 15, maxlen=max_points)
+        self.series2: Deque[float] = collections.deque([0.0] * 15, maxlen=max_points)
+        self.setMinimumHeight(185)
+
+    def push_sample(self, v1: float, v2: float) -> None:
+        self.series1.append(max(0.0, float(v1)))
+        self.series2.append(max(0.0, float(v2)))
+        self.update()
+
+    def set_series(self, s1: List[float], s2: List[float]) -> None:
+        self.series1.clear()
+        self.series2.clear()
+        for v in s1[-self.max_points :]:
+            self.series1.append(max(0.0, float(v)))
+        for v in s2[-self.max_points :]:
+            self.series2.append(max(0.0, float(v)))
+        while len(self.series1) < 2:
+            self.series1.append(0.0)
+        while len(self.series2) < 2:
+            self.series2.append(0.0)
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = self.rect()
+        painter.fillRect(rect, QColor("#0F172A"))
+        border_pen = QPen(QColor("#334155"), 1)
+        painter.setPen(border_pen)
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 8, 8)
+
+        # Header & Legend
+        painter.setPen(QColor("#E2E8F0"))
+        painter.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
+        painter.drawText(14, 22, self.title)
+
+        cur1 = self.series1[-1] if self.series1 else 0.0
+        cur2 = self.series2[-1] if self.series2 else 0.0
+        legend_text = f"● {self.series1_name}: {cur1:.1f} {self.unit}    ● {self.series2_name}: {cur2:.1f} {self.unit}"
+        painter.setFont(QFont("Microsoft YaHei", 8))
+        painter.setPen(self.color1)
+        painter.drawText(rect.width() - 360, 22, legend_text)
+
+        plot = QRectF(46, 34, max(40, rect.width() - 60), max(40, rect.height() - 50))
+        max_val = max(
+            max(self.series1) if self.series1 else 1.0,
+            max(self.series2) if self.series2 else 1.0,
+            10.0,
+        ) * 1.15
+
+        # Draw grid lines
+        grid_pen = QPen(QColor("#1E293B"), 1, Qt.DashLine)
+        label_pen = QPen(QColor("#64748B"), 1)
+        for i in range(4):
+            y = plot.top() + plot.height() * i / 3.0
+            painter.setPen(grid_pen)
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+            val = max_val * (1.0 - i / 3.0)
+            painter.setPen(label_pen)
+            painter.drawText(4, int(y + 4), f"{val:.0f}")
+
+        self._draw_curve(painter, plot, list(self.series1), max_val, self.color1)
+        self._draw_curve(painter, plot, list(self.series2), max_val, self.color2)
+        painter.end()
+
+    @staticmethod
+    def _draw_curve(
+        painter: QPainter,
+        plot: QRectF,
+        values: List[float],
+        max_val: float,
+        color: QColor,
+    ) -> None:
+        if len(values) < 2:
+            return
+        n = len(values)
+        pts: List[QPointF] = []
+        for idx, v in enumerate(values):
+            x = plot.left() + plot.width() * idx / (n - 1)
+            y = plot.bottom() - (min(v, max_val) / max_val) * plot.height()
+            pts.append(QPointF(x, y))
+
+        path = QPainterPath()
+        path.moveTo(pts[0])
+        for pt in pts[1:]:
+            path.lineTo(pt)
+
+        fill_path = QPainterPath(path)
+        fill_path.lineTo(QPointF(pts[-1].x(), plot.bottom()))
+        fill_path.lineTo(QPointF(pts[0].x(), plot.bottom()))
+        fill_path.closeSubpath()
+
+        grad = QLinearGradient(0, plot.top(), 0, plot.bottom())
+        c_top = QColor(color)
+        c_top.setAlpha(75)
+        c_bot = QColor(color)
+        c_bot.setAlpha(4)
+        grad.setColorAt(0.0, c_top)
+        grad.setColorAt(1.0, c_bot)
+        painter.fillPath(fill_path, QBrush(grad))
+
+        line_pen = QPen(color, 2.2)
+        painter.setPen(line_pen)
+        painter.drawPath(path)
 
 
 class MetricCard(QFrame):
@@ -243,7 +382,7 @@ class MetricCard(QFrame):
 
 
 class ResinMainWindow(QMainWindow):
-    """Resin 智能代理池网关 — 中文现代桌面端主窗口."""
+    """Resin 智能代理池网关 v1.2.0 — 中文现代桌面端主窗口."""
 
     def __init__(
         self,
@@ -251,6 +390,7 @@ class ResinMainWindow(QMainWindow):
         api_client: Optional[ResinAPIClient] = None,
         llm_mgr: Optional[LLMProviderManager] = None,
         ds_mgr: Optional[DataSourceManager] = None,
+        watchdog: Optional[AutoHealWatchdog] = None,
         local_api_port: int = 8787,
     ) -> None:
         super().__init__()
@@ -268,12 +408,16 @@ class ResinMainWindow(QMainWindow):
         )
         self.llm_mgr = llm_mgr or LLMProviderManager()
         self.ds_mgr = ds_mgr or DataSourceManager()
+        self.watchdog = watchdog or AutoHealWatchdog(self.api, self.core_mgr)
+        self.watchdog.start()
         self.updater = AutoUpdater()
         self.local_api_port = local_api_port
+        self._force_quit = False
 
         self.setWindowTitle(f"{__app_name__} v{__version__} — 高性能粘性会话代理池网关控制台")
-        self.resize(1360, 860)
+        self.resize(1380, 880)
         self._apply_window_icon()
+        self._setup_system_tray()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -288,7 +432,7 @@ class ResinMainWindow(QMainWindow):
         self.tabs = QTabWidget()
         root_layout.addWidget(self.tabs, 1)
 
-        self.tabs.addTab(self._build_dashboard_tab(), "🚀 网关总览与监控")
+        self.tabs.addTab(self._build_dashboard_tab(), "🚀 网关总览与实时图表")
         self.tabs.addTab(self._build_subscriptions_tab(), "📡 订阅源管理")
         self.tabs.addTab(self._build_platforms_tab(), "🎯 平台与粘性隔离池")
         self.tabs.addTab(self._build_nodes_tab(), "🌐 全局节点池与探测")
@@ -298,18 +442,18 @@ class ResinMainWindow(QMainWindow):
         self.tabs.addTab(self._build_request_logs_tab(), "📜 结构化请求日志")
         self.tabs.addTab(self._build_geoip_sysconfig_tab(), "🌍 GeoIP 与系统配置")
         self.tabs.addTab(self._build_datasources_tab(), "🗄️ 数据源 API 中心")
-        self.tabs.addTab(self._build_llm_updater_tab(), "🤖 大模型助手与更新")
+        self.tabs.addTab(self._build_llm_updater_tab(), "🤖 大模型自愈与更新")
 
         # 底部状态栏
         self.status_bar = self.statusBar()
         self.status_bar.showMessage(
-            f"就绪 | Resin 控制面: {self.api.base_url} | 本地 OpenAI 兼容网关: http://127.0.0.1:{self.local_api_port}"
+            f"就绪 | Resin 控制面: {self.api.base_url} | 本地 OpenAI 兼容网关: http://127.0.0.1:{self.local_api_port} | 关闭窗口将自动最小化至系统托盘"
         )
 
         # 定时刷新器
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._periodic_tick)
-        self.timer.start(4000)
+        self.timer.start(3500)
 
         # 自动尝试启动内置 resin-core 引擎
         QTimer.singleShot(300, self._auto_start_core_on_launch)
@@ -342,6 +486,64 @@ class ResinMainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _setup_system_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_icon = None
+            return
+        ico_path = resolve_app_icon_path()
+        icon = QIcon(str(ico_path)) if ico_path else self.windowIcon()
+        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon.setToolTip(f"{__app_name__} v{__version__} (后台常驻运行中)")
+
+        menu = QMenu(self)
+        act_show = QAction("🖥 显示 Resin 主控制台", self)
+        act_show.triggered.connect(self._restore_from_tray)
+        menu.addAction(act_show)
+
+        act_restart = QAction("▶ 启动 / 重启本地网关引擎", self)
+        act_restart.triggered.connect(self._on_restart_core)
+        menu.addAction(act_restart)
+
+        act_heal = QAction("🩺 立即执行 AI 节点池巡检与自愈", self)
+        act_heal.triggered.connect(self._trigger_manual_auto_heal)
+        menu.addAction(act_heal)
+
+        menu.addSeparator()
+        act_proxy_on = QAction("⚡ 开启 Windows 系统代理", self)
+        act_proxy_on.triggered.connect(lambda: self._toggle_windows_proxy(True))
+        menu.addAction(act_proxy_on)
+
+        act_proxy_off = QAction("关闭 Windows 系统代理", self)
+        act_proxy_off.triggered.connect(lambda: self._toggle_windows_proxy(False))
+        menu.addAction(act_proxy_off)
+
+        menu.addSeparator()
+        act_quit = QAction("🚪 彻底退出并停止网关", self)
+        act_quit.triggered.connect(self.quit_completely)
+        menu.addAction(act_quit)
+
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._restore_from_tray()
+
+    def _restore_from_tray(self) -> None:
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def quit_completely(self) -> None:
+        self._force_quit = True
+        self.watchdog.stop()
+        if self.core_mgr.is_running():
+            self.core_mgr.stop()
+        if getattr(self, "tray_icon", None):
+            self.tray_icon.hide()
+        QApplication.quit()
+
     def _build_top_bar(self, env_cfg: Dict[str, str]) -> QFrame:
         bar = QFrame()
         bar.setProperty("card", True)
@@ -353,50 +555,79 @@ class ResinMainWindow(QMainWindow):
         layout.addWidget(title_lbl)
 
         self.lbl_core_badge = QLabel("● 本地引擎: 检测中")
-        self.lbl_core_badge.setStyleSheet("color: #F59E0B; font-weight: bold; margin-left: 10px;")
+        self.lbl_core_badge.setStyleSheet("color: #F59E0B; font-weight: bold; margin-left: 8px;")
         layout.addWidget(self.lbl_core_badge)
 
-        layout.addSpacing(12)
-        layout.addWidget(QLabel("网关地址:"))
+        layout.addSpacing(8)
+        layout.addWidget(QLabel("网关:"))
         self.inp_base_url = QLineEdit(self.api.base_url)
-        self.inp_base_url.setFixedWidth(185)
+        self.inp_base_url.setFixedWidth(165)
         layout.addWidget(self.inp_base_url)
 
         layout.addWidget(QLabel("管理密码:"))
         self.inp_admin_token = QLineEdit(self.api.admin_token)
         self.inp_admin_token.setEchoMode(QLineEdit.Password)
-        self.inp_admin_token.setFixedWidth(110)
+        self.inp_admin_token.setFixedWidth(95)
         layout.addWidget(self.inp_admin_token)
 
         layout.addWidget(QLabel("代理密码:"))
         self.inp_proxy_token = QLineEdit(self.api.proxy_token)
         self.inp_proxy_token.setEchoMode(QLineEdit.Password)
-        self.inp_proxy_token.setFixedWidth(110)
+        self.inp_proxy_token.setFixedWidth(95)
         layout.addWidget(self.inp_proxy_token)
 
-        btn_connect = QPushButton("连接 / 刷新全局")
+        btn_connect = QPushButton("刷新全局")
         btn_connect.clicked.connect(self.refresh_all_views)
         layout.addWidget(btn_connect)
 
-        btn_start_core = QPushButton("▶ 启动本地引擎")
+        btn_start_core = QPushButton("▶ 启动引擎")
         btn_start_core.setProperty("btnRole", "success")
         btn_start_core.clicked.connect(self._on_start_core)
         layout.addWidget(btn_start_core)
 
-        btn_stop_core = QPushButton("■ 停止引擎")
+        btn_stop_core = QPushButton("■ 停止")
         btn_stop_core.setProperty("btnRole", "danger")
         btn_stop_core.clicked.connect(self._on_stop_core)
         layout.addWidget(btn_stop_core)
 
-        btn_webui = QPushButton("🌐 浏览器打开 WebUI")
+        self.chk_startup = QCheckBox("开机自启")
+        self.chk_startup.setChecked(self.core_mgr.is_windows_startup_enabled())
+        self.chk_startup.toggled.connect(self._on_toggle_windows_startup)
+        layout.addWidget(self.chk_startup)
+
+        self.chk_auto_heal = QCheckBox("AI 自动巡检自愈")
+        self.chk_auto_heal.setChecked(True)
+        self.chk_auto_heal.toggled.connect(self._on_toggle_auto_heal)
+        layout.addWidget(self.chk_auto_heal)
+
+        btn_webui = QPushButton("🌐 WebUI")
         btn_webui.setProperty("btnRole", "secondary")
         btn_webui.clicked.connect(lambda: webbrowser.open(self.api.base_url))
         layout.addWidget(btn_webui)
 
         return bar
 
+    def _on_toggle_windows_startup(self, checked: bool) -> None:
+        ok, msg = self.core_mgr.set_windows_startup(checked)
+        self.status_bar.showMessage(msg)
+
+    def _on_toggle_auto_heal(self, checked: bool) -> None:
+        self.watchdog.enabled = checked
+        state = "已启用 AI 定时巡检与节点池自愈" if checked else "已暂停 AI 定时巡检自愈"
+        self.status_bar.showMessage(state)
+
+    def _trigger_manual_auto_heal(self) -> None:
+        self.status_bar.showMessage("🩺 正在执行 AI 节点池健康巡检与熔断自愈...")
+        self.bridge.run_async(
+            self.watchdog.run_patrol_once,
+            lambda r: (
+                self.status_bar.showMessage(r.get("summary", "巡检完成") if isinstance(r, dict) else str(r)),
+                self.refresh_all_views(),
+            ),
+        )
+
     # =========================================================================
-    # Tab 1: 网关总览与实时监控
+    # Tab 1: 网关总览与实时动态图表监控
     # =========================================================================
     def _build_dashboard_tab(self) -> QWidget:
         w = QWidget()
@@ -417,6 +648,28 @@ class ResinMainWindow(QMainWindow):
         cards_grid.addWidget(self.card_connections, 0, 4)
         cards_grid.addWidget(self.card_leases, 0, 5)
         layout.addLayout(cards_grid)
+
+        # 中部：双实时动态曲线图表 (吞吐速率折线图 + 并发连接与粘性租约折线图)
+        charts_row = QHBoxLayout()
+        self.chart_throughput = RealtimeLineChartWidget(
+            title="📈 实时网络吞吐速率监控曲线 (KB/s)",
+            series1_name="下行吞吐 (Egress)",
+            series2_name="上行吞吐 (Ingress)",
+            color1="#38BDF8",
+            color2="#10B981",
+            unit="KB/s",
+        )
+        self.chart_conns_leases = RealtimeLineChartWidget(
+            title="🔗 实时并发连接数与活跃粘性租约趋势",
+            series1_name="并发连接数 (Conns)",
+            series2_name="活跃粘性租约 (Leases)",
+            color1="#F59E0B",
+            color2="#A855F7",
+            unit="",
+        )
+        charts_row.addWidget(self.chart_throughput, 1)
+        charts_row.addWidget(self.chart_conns_leases, 1)
+        layout.addLayout(charts_row)
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -439,17 +692,20 @@ class ResinMainWindow(QMainWindow):
         btn_sys_off = QPushButton("关闭 Windows 系统代理")
         btn_sys_off.setProperty("btnRole", "secondary")
         btn_sys_off.clicked.connect(lambda: self._toggle_windows_proxy(False))
+        btn_ai_heal = QPushButton("🩺 立即执行 AI 巡检自愈")
+        btn_ai_heal.clicked.connect(self._trigger_manual_auto_heal)
         sys_proxy_row.addWidget(btn_sys_on)
         sys_proxy_row.addWidget(btn_sys_off)
+        sys_proxy_row.addWidget(btn_ai_heal)
         left_lay.addLayout(sys_proxy_row)
         splitter.addWidget(left_box)
 
         # 右侧：本地 resin-core 实时控制台日志 & 快捷接入命令
-        right_box = QGroupBox("本地 Resin 引擎实时日志 & 快速接入指南")
+        right_box = QGroupBox("本地 Resin 引擎与 AI 自愈实时日志 & 快速接入")
         right_lay = QVBoxLayout(right_box)
         self.txt_core_logs = QPlainTextEdit()
         self.txt_core_logs.setReadOnly(True)
-        self.txt_core_logs.setPlaceholderText("本地 resin-core 核心引擎启动后，实时运行日志将在此处滚动显示...")
+        self.txt_core_logs.setPlaceholderText("本地 resin-core 核心引擎与 AI 自动巡检自愈日志将在此处实时滚动显示...")
         right_lay.addWidget(self.txt_core_logs)
 
         quick_row = QHBoxLayout()
@@ -457,12 +713,12 @@ class ResinMainWindow(QMainWindow):
         btn_copy_http.clicked.connect(self._copy_http_proxy_cmd)
         btn_copy_socks = QPushButton("复制 SOCKS5 代理地址")
         btn_copy_socks.clicked.connect(self._copy_socks_proxy_cmd)
-        btn_restart_core = QPushButton("↻ 重启本地引擎")
-        btn_restart_core.setProperty("btnRole", "secondary")
-        btn_restart_core.clicked.connect(self._on_restart_core)
+        btn_hide_tray = QPushButton("📥 最小化到系统托盘")
+        btn_hide_tray.setProperty("btnRole", "secondary")
+        btn_hide_tray.clicked.connect(self.hide)
         quick_row.addWidget(btn_copy_http)
         quick_row.addWidget(btn_copy_socks)
-        quick_row.addWidget(btn_restart_core)
+        quick_row.addWidget(btn_hide_tray)
         right_lay.addLayout(quick_row)
         splitter.addWidget(right_box)
 
@@ -476,7 +732,6 @@ class ResinMainWindow(QMainWindow):
         w = QWidget()
         layout = QHBoxLayout(w)
 
-        # 左侧列表
         left_box = QGroupBox("代理节点订阅源列表 (支持 Sing-box / Clash / URI / Base64 / HTTP 行)")
         left_lay = QVBoxLayout(left_box)
 
@@ -512,7 +767,6 @@ class ResinMainWindow(QMainWindow):
         left_lay.addWidget(self.tbl_subs)
         layout.addWidget(left_box, 3)
 
-        # 右侧新建/编辑订阅表单
         right_box = QGroupBox("新建 / 编辑代理订阅源")
         form = QFormLayout(right_box)
 
@@ -530,7 +784,7 @@ class ResinMainWindow(QMainWindow):
 
         self.txt_sub_content = QPlainTextEdit()
         self.txt_sub_content.setPlaceholderText(
-            "当选择 local 本地订阅时，在此直接粘贴 vmess://、vless://、ss://、hysteria2://、socks5://、IP:PORT:USER:PASS、Clash YAML 或 Sing-box JSON..."
+            "当选择 local 本地订阅时，在此直接粘贴节点 URI 列表、IP:PORT:USER:PASS、Clash YAML 或 Sing-box JSON..."
         )
         self.txt_sub_content.setFixedHeight(110)
 
@@ -805,7 +1059,6 @@ class ResinMainWindow(QMainWindow):
         w = QWidget()
         layout = QHBoxLayout(w)
 
-        # 左侧：多端口接入点管理
         left_box = QGroupBox("多端口监听接入点管理 (热添加端口并独立控制管理后台 / HTTP 正向 / 反代 / SOCKS5)")
         left_lay = QVBoxLayout(left_box)
 
@@ -848,7 +1101,6 @@ class ResinMainWindow(QMainWindow):
         left_lay.addWidget(self.tbl_endpoints)
         layout.addWidget(left_box, 3)
 
-        # 右侧：代理连通性与粘性会话测试工坊
         right_box = QGroupBox("代理连通性与粘性会话实时测试工坊")
         form = QFormLayout(right_box)
 
@@ -984,7 +1236,6 @@ class ResinMainWindow(QMainWindow):
         w = QWidget()
         layout = QHBoxLayout(w)
 
-        # 左侧：运行时热更新配置 + GeoIP 查询
         left_box = QGroupBox("运行时全局热更新配置 (PATCH /api/v1/system/config 无需重启即刻生效)")
         form = QFormLayout(left_box)
 
@@ -1032,7 +1283,6 @@ class ResinMainWindow(QMainWindow):
 
         layout.addWidget(left_box, 1)
 
-        # 右侧：本地 .env 配置文件可视化编辑
         right_box = QGroupBox("本地引擎启动环境变量 (.env) 可视化配置")
         r_lay = QVBoxLayout(right_box)
         self.txt_env_editor = QPlainTextEdit()
@@ -1103,13 +1353,12 @@ class ResinMainWindow(QMainWindow):
         return w
 
     # =========================================================================
-    # Tab 11: 大模型与本地 API 配置 + AI 助手 + 自动更新
+    # Tab 11: 大模型与本地 API 配置 + AI 自动巡检自愈 + 自动更新
     # =========================================================================
     def _build_llm_updater_tab(self) -> QWidget:
         w = QWidget()
         layout = QHBoxLayout(w)
 
-        # 左侧：大模型与本地 API 配置 + 自动更新
         left_col = QVBoxLayout()
         llm_box = QGroupBox(f"大模型与本地 API 配置 (内置 OpenAI 兼容网关: http://127.0.0.1:{self.local_api_port})")
         form = QFormLayout(llm_box)
@@ -1165,8 +1414,7 @@ class ResinMainWindow(QMainWindow):
 
         layout.addLayout(left_col, 2)
 
-        # 右侧：Resin AI 智能代理助手
-        ai_box = QGroupBox("🤖 Resin AI 智能代理规则与接入代码生成助手")
+        ai_box = QGroupBox("🤖 Resin AI 智能代理规则、自动自愈巡检与接入代码助手")
         ai_lay = QVBoxLayout(ai_box)
 
         preset_row = QHBoxLayout()
@@ -1180,8 +1428,8 @@ class ResinMainWindow(QMainWindow):
         btn_p2.clicked.connect(
             lambda: self._run_ai_prompt("请生成 Python requests 和 httpx 接入 Resin 粘性代理（包含正向代理和反向代理 X-Resin-Account 请求头两种方式）的完整示例代码。")
         )
-        btn_p3 = QPushButton("🩺 诊断当前节点池健康状态")
-        btn_p3.setProperty("btnRole", "secondary")
+        btn_p3 = QPushButton("🩺 执行 AI 自愈巡检并生成诊断报告")
+        btn_p3.setProperty("btnRole", "success")
         btn_p3.clicked.connect(self._diagnose_pool_with_ai)
         preset_row.addWidget(btn_p1)
         preset_row.addWidget(btn_p2)
@@ -1190,7 +1438,7 @@ class ResinMainWindow(QMainWindow):
 
         self.txt_ai_chat = QPlainTextEdit()
         self.txt_ai_chat.setReadOnly(True)
-        self.txt_ai_chat.setPlaceholderText("在此查看 AI 助手为您生成的 Platform 正则表达式、故障诊断报告与多语言粘性代理接入代码...")
+        self.txt_ai_chat.setPlaceholderText("在此查看 AI 助手为您生成的 Platform 正则表达式、节点池自愈巡检报告与多语言粘性代理接入代码...")
         ai_lay.addWidget(self.txt_ai_chat, 1)
 
         ask_row = QHBoxLayout()
@@ -1220,7 +1468,7 @@ class ResinMainWindow(QMainWindow):
         ok, _ = self.api.healthz()
         if ok:
             self.lbl_core_badge.setText("● 网关在线 (已连接)")
-            self.lbl_core_badge.setStyleSheet("color: #10B981; font-weight: bold; margin-left: 10px;")
+            self.lbl_core_badge.setStyleSheet("color: #10B981; font-weight: bold; margin-left: 8px;")
             self.refresh_all_views()
             return
 
@@ -1230,7 +1478,7 @@ class ResinMainWindow(QMainWindow):
             QTimer.singleShot(1200, self.refresh_all_views)
         else:
             self.lbl_core_badge.setText("● 远程控制模式")
-            self.lbl_core_badge.setStyleSheet("color: #38BDF8; font-weight: bold; margin-left: 10px;")
+            self.lbl_core_badge.setStyleSheet("color: #38BDF8; font-weight: bold; margin-left: 8px;")
 
     def _periodic_tick(self) -> None:
         logs = self.core_mgr.get_recent_logs()
@@ -1251,7 +1499,7 @@ class ResinMainWindow(QMainWindow):
         ok, msg = self.core_mgr.stop()
         self.status_bar.showMessage(msg)
         self.lbl_core_badge.setText("● 本地引擎: 已停止")
-        self.lbl_core_badge.setStyleSheet("color: #EF4444; font-weight: bold; margin-left: 10px;")
+        self.lbl_core_badge.setStyleSheet("color: #EF4444; font-weight: bold; margin-left: 8px;")
 
     def _on_restart_core(self) -> None:
         ok, msg = self.core_mgr.restart()
@@ -1319,10 +1567,10 @@ class ResinMainWindow(QMainWindow):
                 return
             if res.get("healthy"):
                 self.lbl_core_badge.setText("● 网关在线 (运行正常)")
-                self.lbl_core_badge.setStyleSheet("color: #10B981; font-weight: bold; margin-left: 10px;")
+                self.lbl_core_badge.setStyleSheet("color: #10B981; font-weight: bold; margin-left: 8px;")
             else:
                 self.lbl_core_badge.setText("● 网关未连接")
-                self.lbl_core_badge.setStyleSheet("color: #F59E0B; font-weight: bold; margin-left: 10px;")
+                self.lbl_core_badge.setStyleSheet("color: #F59E0B; font-weight: bold; margin-left: 8px;")
 
             info = res.get("info")
             if isinstance(info, dict):
@@ -1332,34 +1580,50 @@ class ResinMainWindow(QMainWindow):
 
             snap = res.get("snap")
             if isinstance(snap, dict):
-                self.card_total_nodes.set_value(str(snap.get("total_nodes", 0)))
-                self.card_healthy_nodes.set_value(
-                    str(snap.get("healthy_nodes", 0)),
-                    color="#10B981",
-                )
+                total_n = snap.get("total_nodes", 0)
+                healthy_n = snap.get("healthy_nodes", 0)
+                egress_n = snap.get("egress_ip_count", 0)
+                self.card_total_nodes.set_value(str(total_n))
+                self.card_healthy_nodes.set_value(str(healthy_n), color="#10B981")
                 self.card_egress_ips.set_value(
-                    str(snap.get("egress_ip_count", 0)),
+                    str(egress_n),
                     sub=f"健康独立 IP: {snap.get('healthy_egress_ip_count', 0)}",
                 )
+                if getattr(self, "tray_icon", None):
+                    self.tray_icon.setToolTip(
+                        f"{__app_name__} v{__version__}\n健康节点: {healthy_n}/{total_n} | 独立出口 IP: {egress_n}"
+                    )
 
             tp = res.get("tp")
             if isinstance(tp, dict) and tp.get("items"):
-                last_tp = tp["items"][-1]
+                items = tp["items"]
+                last_tp = items[-1]
                 in_kb = last_tp.get("ingress_bps", 0) / 1024.0
                 out_kb = last_tp.get("egress_bps", 0) / 1024.0
                 self.card_throughput.set_value(f"{out_kb:.1f} KB/s", sub=f"入站: {in_kb:.1f} KB/s")
+                s_out = [x.get("egress_bps", 0) / 1024.0 for x in items[-45:]]
+                s_in = [x.get("ingress_bps", 0) / 1024.0 for x in items[-45:]]
+                self.chart_throughput.set_series(s_out, s_in)
+            else:
+                self.chart_throughput.push_sample(0.0, 0.0)
 
+            total_conns_now = 0
             conns = res.get("conns")
             if isinstance(conns, dict) and conns.get("items"):
                 last_c = conns["items"][-1]
                 in_c = last_c.get("inbound_connections", 0)
                 out_c = last_c.get("outbound_connections", 0)
-                self.card_connections.set_value(str(in_c + out_c), sub=f"入站: {in_c} | 出站: {out_c}")
+                total_conns_now = in_c + out_c
+                self.card_connections.set_value(str(total_conns_now), sub=f"入站: {in_c} | 出站: {out_c}")
 
+            active_leases_now = 0
             leases = res.get("leases")
             if isinstance(leases, dict) and leases.get("items"):
                 last_l = leases["items"][-1]
-                self.card_leases.set_value(str(last_l.get("active_leases", 0)), color="#A855F7")
+                active_leases_now = last_l.get("active_leases", 0)
+                self.card_leases.set_value(str(active_leases_now), color="#A855F7")
+
+            self.chart_conns_leases.push_sample(float(total_conns_now), float(active_leases_now))
 
             hist = res.get("hist")
             if isinstance(hist, dict) and isinstance(hist.get("buckets"), list):
@@ -2098,8 +2362,13 @@ class ResinMainWindow(QMainWindow):
         )
 
     def _diagnose_pool_with_ai(self) -> None:
+        patrol_res = self.watchdog.run_patrol_once()
         _, snap = self.api.get_snapshot_node_pool()
-        prompt = f"当前 Resin 节点池实时快照为：{json.dumps(snap, ensure_ascii=False)}。请分析健康率并给出优化建议与 Platform 配置建议。"
+        prompt = (
+            f"刚完成了 AI 自动巡检自愈，执行摘要为：{patrol_res.get('summary')}。\n"
+            f"当前 Resin 节点池实时快照为：{json.dumps(snap, ensure_ascii=False)}。\n"
+            "请结合自愈结果分析当前节点池健康率，并给出进一步的 Platform 策略与探测间隔调优建议。"
+        )
         self._run_ai_prompt(prompt)
 
     def _check_updates(self) -> None:
@@ -2125,6 +2394,17 @@ class ResinMainWindow(QMainWindow):
         QMessageBox.information(self, "更新安装", res.get("message", ""))
 
     def closeEvent(self, event: Any) -> None:
+        if not self._force_quit and getattr(self, "tray_icon", None) and self.tray_icon.isVisible():
+            event.ignore()
+            self.hide()
+            self.tray_icon.showMessage(
+                __app_name__,
+                "Resin 已最小化至系统托盘继续在后台提供代理池服务。双击托盘图标可恢复主窗口。",
+                QSystemTrayIcon.Information,
+                2500,
+            )
+            return
+        self.watchdog.stop()
         if self.core_mgr.is_running():
             self.core_mgr.stop()
         super().closeEvent(event)
@@ -2135,10 +2415,13 @@ def launch_desktop_gui(
     api_client: Optional[ResinAPIClient] = None,
     llm_mgr: Optional[LLMProviderManager] = None,
     ds_mgr: Optional[DataSourceManager] = None,
+    watchdog: Optional[AutoHealWatchdog] = None,
     local_api_port: int = 8787,
+    start_minimized: bool = False,
 ) -> int:
     enable_windows_hidpi_and_app_id()
     app = QApplication.instance() or QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(DARK_STYLESHEET)
     font = QFont("Microsoft YaHei", 10)
     app.setFont(font)
@@ -2148,7 +2431,11 @@ def launch_desktop_gui(
         api_client=api_client,
         llm_mgr=llm_mgr,
         ds_mgr=ds_mgr,
+        watchdog=watchdog,
         local_api_port=local_api_port,
     )
-    win.show()
+    if start_minimized and getattr(win, "tray_icon", None):
+        win.hide()
+    else:
+        win.show()
     return app.exec()

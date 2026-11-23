@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release Tag (e.g. v1.1.0)"
+        description: "Release Tag (e.g. v1.2.0)"
         required: false
-        default: "v1.1.0"
+        default: "v1.2.0"
   push:
     branches:
       - master
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   build-windows-setup:
-    name: Build Windows Setup.exe (PySide6 GUI + Go Core)
+    name: Build Windows 11 Modern Chinese Setup.exe (PySide6 GUI + Go Core)
     runs-on: windows-latest
     steps:
       - name: Checkout Fork Repository
@@ -93,7 +93,7 @@ jobs:
           GOOS: "windows"
           GOARCH: "amd64"
         run: |
-          $ver = "v1.1.0"
+          $ver = "v1.2.0"
           $commit = (git rev-parse --short=8 HEAD)
           $buildTime = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls" `
@@ -146,14 +146,41 @@ jobs:
           }
           Write-Host "CI self-test passed with exit code 0"
 
-      - name: Compile Inno Setup Standard Installer (Resin-Setup-win64.exe)
+      - name: Compile Modern Windows 11 Fluent Dark Chinese Setup Wizard (Resin-Setup-win64.exe)
         shell: pwsh
         run: |
-          iscc /DMyAppVersion="1.1.0" installer\resin.iss
+          New-Item -ItemType Directory -Force -Path ".\build" | Out-Null
+          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          $wpfDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
+          & $csc /target:winexe /platform:x64 /optimize+ /utf8output `
+            /win32icon:assets\resin.ico `
+            /r:"$wpfDir\PresentationFramework.dll" `
+            /r:"$wpfDir\PresentationCore.dll" `
+            /r:"$wpfDir\WindowsBase.dll" `
+            /r:System.Xaml.dll `
+            /r:System.IO.Compression.dll `
+            /r:System.IO.Compression.FileSystem.dll `
+            /out:build\Win11SetupStub.exe `
+            installer\Win11FluentInstaller.cs
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path ".\build\Win11SetupStub.exe")) {
+            Write-Error "Failed to compile Win11FluentInstaller.cs"
+            exit 1
+          }
+
+          python scripts/build_win11_installer.py
           if (-not (Test-Path ".\dist_installer\Resin-Setup-win64.exe")) {
             Write-Error "Resin-Setup-win64.exe was not generated!"
             exit 1
           }
+
+          # Verify the Windows 11 installer executes a silent extraction & shortcut/registry test cleanly
+          $testInstallDir = Join-Path $env:RUNNER_TEMP "ResinWin11InstallerTest"
+          $iproc = Start-Process -FilePath ".\dist_installer\Resin-Setup-win64.exe" -ArgumentList "/S", "/DIR=`"$testInstallDir`"" -Wait -PassThru -NoNewWindow
+          if ($iproc.ExitCode -ne 0 -or -not (Test-Path (Join-Path $testInstallDir "Resin.exe"))) {
+            Write-Error "Windows 11 installer verification failed with exit code $($iproc.ExitCode)"
+            exit 1
+          }
+          Write-Host "Windows 11 Fluent Dark Chinese Installer verified cleanly!"
           Get-Item ".\dist_installer\Resin-Setup-win64.exe" | Select-Object Name, Length
 
       - name: Upload Windows Setup.exe Artifact
@@ -164,7 +191,7 @@ jobs:
           retention-days: 5
 
   build-android-apk:
-    name: Build Android APK (arm64-v8a + Embedded Go Core)
+    name: Build Android APK (arm64-v8a + 16KB Aligned + Release Signed)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -192,7 +219,7 @@ jobs:
           GOOS: "linux"
           GOARCH: "arm64"
         run: |
-          VERSION="v1.1.0"
+          VERSION="v1.2.0"
           GIT_COMMIT=$(git rev-parse --short=8 HEAD)
           BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
@@ -216,28 +243,56 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
+      - name: Generate Dedicated Release Keystore (resin-release.jks)
+        working-directory: ./android/app
+        run: |
+          keytool -genkeypair -v \
+            -keystore resin-release.jks \
+            -alias resin_key \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass resin_release_store \
+            -keypass resin_release_store \
+            -dname "CN=Resin Proxy Gateway, OU=Engineering, O=ResinProject, L=Shanghai, ST=Shanghai, C=CN"
+
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Build Signed Release Android APK
+      - name: Build Signed & 16KB Page-Aligned Release Android APK
         working-directory: ./android
         run: |
           gradle assembleRelease --no-daemon --stacktrace
           mkdir -p ../dist_apk
-          cp app/build/outputs/apk/release/app-release.apk ../dist_apk/Resin-v1.1.0-arm64-v8a.apk
-          ls -lh ../dist_apk/Resin-v1.1.0-arm64-v8a.apk
+          RAW_APK="app/build/outputs/apk/release/app-release.apk"
+          ZIPALIGN_BIN=$(find $ANDROID_HOME/build-tools -name "zipalign" | sort -V | tail -n 1)
+          APKSIGNER_BIN=$(find $ANDROID_HOME/build-tools -name "apksigner" | sort -V | tail -n 1)
+
+          if [ -n "$ZIPALIGN_BIN" ] && [ -n "$APKSIGNER_BIN" ]; then
+            "$ZIPALIGN_BIN" -P 16 -f -v 4 "$RAW_APK" ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
+            "$APKSIGNER_BIN" sign --ks app/resin-release.jks \
+              --ks-key-alias resin_key \
+              --ks-pass pass:resin_release_store \
+              --key-pass pass:resin_release_store \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
+            "$APKSIGNER_BIN" verify -v ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
+          else
+            cp "$RAW_APK" ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
+          fi
+          ls -lh ../dist_apk/Resin-v1.2.0-arm64-v8a.apk
 
       - name: Upload Android APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: dist_apk/Resin-v1.1.0-arm64-v8a.apk
+          path: dist_apk/Resin-v1.2.0-arm64-v8a.apk
           retention-days: 5
 
   publish-release:
-    name: Publish GitHub Release (Setup.exe & APK)
+    name: Publish GitHub Release v1.2.0 (Setup.exe & APK)
     runs-on: ubuntu-latest
     needs: [build-windows-setup, build-android-apk]
     permissions:
@@ -253,37 +308,41 @@ jobs:
         run: |
           ls -lh release_assets/
           test -f release_assets/Resin-Setup-win64.exe
-          test -f release_assets/Resin-v1.1.0-arm64-v8a.apk
+          test -f release_assets/Resin-v1.2.0-arm64-v8a.apk
 
       - name: Create Release Notes
         run: |
           cat << 'EOF' > release_notes.md
-          ## 🛡️ Resin 智能代理池网关 v1.1.0 (Windows 中文桌面安装包 & Android 移动端 APK)
+          ## 🛡️ Resin 智能代理池网关 v1.2.0 (Windows 11 全中文现代安装器 & Android VPN 透明接管版)
 
-          本发行版基于上游 [`Resinat/Resin`](https://github.com/Resinat/Resin) 深度构建，提供 **Windows 64 位标准向导安装包 (`Resin-Setup-win64.exe`)** 与 **Android 64 位移动端安装包 (`Resin-v1.1.0-arm64-v8a.apk`)**。
+          本发行版基于上游 [`Resinat/Resin`](https://github.com/Resinat/Resin) 深度构建与全面升级，提供 **全新 Windows 11 Fluent Dark 全中文现代安装包 (`Resin-Setup-win64.exe`)** 与 **Android 64 位 16KB 对齐签名安装包 (`Resin-v1.2.0-arm64-v8a.apk`)**。
 
-          ### 📦 发行资产清单
-          1. **`Resin-Setup-win64.exe` (Windows 10/11 64位标准安装程序)**
-             - **纯原生 PySide6 (Qt 6) 现代暗色中文桌面客户端**（支持 Per-Monitor v2 HiDPI 高分屏抗锯齿渲染、自定义安装路径、桌面与开始菜单快捷方式、标准控制面板卸载程序）。
-             - **内置 `resin-core.exe` 高性能 Go 核心网关引擎**：启动客户端即自动托管并拉起本地网关守护进程（默认端口 `2260`，支持一键设为 Windows 系统代理），同时支持连接任意远程 Resin 服务器。
-             - **100% 完整覆盖原项目功能**：网关总览与实时监控、订阅源管理（Sing-box / Clash / URI / Base64 / HTTP）、Platform 粘性隔离池与正则/地区过滤预览、全局节点池与主动出口/延迟探测、粘性租约管理与子账号租约继承、多接入点端口热管理与代理连通性测试工坊、请求头账号提取规则与 URL 仿真器、结构化请求日志与报文载荷审计、GeoIP 查询与运行时配置热更新。
-             - **数据源 API 中心 & 本地/云端大模型助手**：内置本地 OpenAI 兼容网关（`127.0.0.1:8787`），支持 Ollama / LM Studio / vLLM 免 Key 本地推理与 DeepSeek / 通义千问 / 硅基流动 / 智谱 GLM / Kimi / OpenAI / Gemini / Claude 等云端模型，一键生成 Platform 正则规则与业务粘性接入代码。
-          2. **`Resin-v1.1.0-arm64-v8a.apk` (Android 8.0+ / Android 16 64位安装包)**
-             - **内置 `libresin_core.so` 本地 Go 核心网关引擎 + 远程控制双模式**：支持通过 Android 前台常驻服务直接在手机本地运行完整的 Resin 粘性代理池网关（自动适配无 `/etc/resolv.conf` 的 Bootstrap DNS 与 Android 14-16 APEX CA 证书目录），亦可远程管理电脑或云服务器上的 Resin 节点池。
-             - **6 大全中文原生功能模块 + 内置完整 React WebUI 控制台**。
+          ### ✨ v1.2.0 核心新增与优化特性
+          1. **全新 Windows 11 Fluent Dark 全中文现代安装器 (`Resin-Setup-win64.exe`)**
+             - **100% 纯正简体中文现代界面**：彻底替换旧式英文安装向导，采用原生 `.NET WPF` + Windows 11 `DWM` 圆角暗色卡片视觉风格（`#0B1120` 深海暗色底座 + 霓虹青蓝/翡翠流光渐变进度条）。
+             - **一键极速安装与自定义选项**：支持自定义安装路径、创建桌面与开始菜单快捷方式、配置开机自动启动、实时展示多线程文件部署进度，并内置全中文图形化卸载向导（`Uninstall-Resin.exe`）与 Windows 11「设置 -> 已安装的应用」完整注册。
+          2. **Windows 桌面端重磅升级 (`PySide6 Qt 6`)**
+             - **系统托盘最小化常驻 (`QSystemTrayIcon`) 与开机自启**：关闭主窗口时自动最小化驻留至右下角系统托盘（支持托盘气泡提示、双击唤醒、托盘右键快捷启动/重启引擎、一键切换系统代理、立即触发 AI 自愈巡检），并提供顶栏「☑ 开机自启」实时开关。
+             - **硬件加速实时动态双折线图大屏 (`RealtimeLineChartWidget`)**：在总览页直接绘制**上行/下行实时吞吐速率 (KB/s)** 与**活跃并发连接数 / 活跃粘性租约数**动态渐变折线曲线。
+             - **AI 自动巡检与节点池故障自愈守护引擎 (`AutoHealWatchdog`)**：后台定时巡检所有订阅与 Platform，自动清理熔断节点、对熔断节点发起主动延迟恢复探测、刷新低健康率订阅并重建平台可路由视图。
+             - **保留开箱即用默认凭证**：维持默认端口 `2260`、管理密码 `admin123`、代理密码 `my-token`，零配置门槛即可启动使用。
+          3. **Android 移动端重磅升级 (`Resin-v1.2.0-arm64-v8a.apk`)**
+             - **Android `VpnService` 全局与分应用 (Per-App) 透明代理接管**：无需 Root，一键开启系统级 VPN 透明代理隧道（支持全局接管并自动排除自身防回环、白名单仅指定 App 走 Resin、黑名单排除指定 App 直连三种模式）。
+             - **手机开机自动启动本地网关 (`BootCompletedReceiver`)**：支持监听系统 `BOOT_COMPLETED` 广播，手机重启后自动在后台拉起本地 `libresin_core.so` 网关引擎。
+             - **OnePlus 15R (Android 16) 16KB 页面对齐与 V1/V2/V3 正式签名**：通过 `zipalign -P 16` 与专属 Release 证书签名，完美适配 Android 16 16KB 内存页规范。
           EOF
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || 'v1.1.0' }}
-          name: "Resin 智能代理池网关 ${{ inputs.release_tag || 'v1.1.0' }} (Windows Setup.exe & Android APK)"
+          tag_name: ${{ inputs.release_tag || 'v1.2.0' }}
+          name: "Resin 智能代理池网关 ${{ inputs.release_tag || 'v1.2.0' }} (Win11 全中文现代安装包 & Android APK)"
           body_path: release_notes.md
           draft: false
           prerelease: false
           overwrite_files: true
           files: |
             release_assets/Resin-Setup-win64.exe
-            release_assets/Resin-v1.1.0-arm64-v8a.apk
+            release_assets/Resin-v1.2.0-arm64-v8a.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
