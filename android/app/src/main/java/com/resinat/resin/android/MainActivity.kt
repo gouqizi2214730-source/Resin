@@ -158,7 +158,7 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val tvTitle = TextView(this).apply {
-            text = "🛡️ Resin 智能代理池网关 v1.3.1"
+            text = "🛡️ Resin 智能代理池网关 v1.3.2"
             setTextColor(Color.parseColor("#38BDF8"))
             textSize = 17f
             setTypeface(typeface, Typeface.BOLD)
@@ -703,7 +703,7 @@ class MainActivity : AppCompatActivity() {
             if (okInfo) {
                 try {
                     val info = JSONObject(infoRaw)
-                    sb.append("核心版本: ").append(info.optString("version", "v1.3.1"))
+                    sb.append("核心版本: ").append(info.optString("version", "v1.3.2"))
                         .append(" (Commit: ").append(info.optString("git_commit", "-")).append(")\n")
                 } catch (_: Exception) {}
             }
@@ -1331,10 +1331,10 @@ class MainActivity : AppCompatActivity() {
                     conn.setRequestProperty("User-Agent", "Mozilla/5.0 (compatible; Google-Agent; +https://developers.google.com/crawling/docs/crawlers-fetchers/google-agent)")
                     val raw = conn.inputStream.bufferedReader().readText()
                     val rel = JSONObject(raw)
-                    val tag = rel.optString("tag_name", "v1.3.1")
+                    val tag = rel.optString("tag_name", "v1.3.2")
                     val htmlUrl = rel.optString("html_url", "https://github.com/gouqizi2214730-source/Resin/releases")
                     uiHandler.post {
-                        tvDsOut.text = "最新 GitHub Release: $tag\n当前版本: v1.3.1\n发布页面: $htmlUrl"
+                        tvDsOut.text = "最新 GitHub Release: $tag\n当前版本: v1.3.2\n发布页面: $htmlUrl"
                     }
                 } catch (e: Exception) {
                     uiHandler.post { tvDsOut.text = "检查更新异常: ${e.message}" }

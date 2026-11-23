@@ -415,7 +415,19 @@ class ResinMainWindow(QMainWindow):
         self._force_quit = False
 
         self.setWindowTitle(f"{__app_name__} v{__version__} — 高性能粘性会话代理池网关控制台")
-        self.resize(1380, 880)
+        self.setMinimumSize(920, 600)
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            w = min(1320, int(avail.width() * 0.92))
+            h = min(820, int(avail.height() * 0.90))
+            self.resize(max(920, w), max(600, h))
+            self.move(
+                avail.x() + max(0, (avail.width() - self.width()) // 2),
+                avail.y() + max(0, (avail.height() - self.height()) // 2),
+            )
+        else:
+            self.resize(1240, 760)
         self._apply_window_icon()
         self._setup_system_tray()
 
@@ -547,63 +559,68 @@ class ResinMainWindow(QMainWindow):
     def _build_top_bar(self, env_cfg: Dict[str, str]) -> QFrame:
         bar = QFrame()
         bar.setProperty("card", True)
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 8, 12, 8)
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(12, 8, 12, 8)
+        outer.setSpacing(6)
 
+        row1 = QHBoxLayout()
         title_lbl = QLabel(f"🛡️ {__app_name__} v{__version__}")
         title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #38BDF8;")
-        layout.addWidget(title_lbl)
+        row1.addWidget(title_lbl)
 
         self.lbl_core_badge = QLabel("● 本地引擎: 检测中")
         self.lbl_core_badge.setStyleSheet("color: #F59E0B; font-weight: bold; margin-left: 8px;")
-        layout.addWidget(self.lbl_core_badge)
-
-        layout.addSpacing(8)
-        layout.addWidget(QLabel("网关:"))
-        self.inp_base_url = QLineEdit(self.api.base_url)
-        self.inp_base_url.setFixedWidth(165)
-        layout.addWidget(self.inp_base_url)
-
-        layout.addWidget(QLabel("管理密码:"))
-        self.inp_admin_token = QLineEdit(self.api.admin_token)
-        self.inp_admin_token.setEchoMode(QLineEdit.Password)
-        self.inp_admin_token.setFixedWidth(95)
-        layout.addWidget(self.inp_admin_token)
-
-        layout.addWidget(QLabel("代理密码:"))
-        self.inp_proxy_token = QLineEdit(self.api.proxy_token)
-        self.inp_proxy_token.setEchoMode(QLineEdit.Password)
-        self.inp_proxy_token.setFixedWidth(95)
-        layout.addWidget(self.inp_proxy_token)
-
-        btn_connect = QPushButton("刷新全局")
-        btn_connect.clicked.connect(self.refresh_all_views)
-        layout.addWidget(btn_connect)
-
-        btn_start_core = QPushButton("▶ 启动引擎")
-        btn_start_core.setProperty("btnRole", "success")
-        btn_start_core.clicked.connect(self._on_start_core)
-        layout.addWidget(btn_start_core)
-
-        btn_stop_core = QPushButton("■ 停止")
-        btn_stop_core.setProperty("btnRole", "danger")
-        btn_stop_core.clicked.connect(self._on_stop_core)
-        layout.addWidget(btn_stop_core)
+        row1.addWidget(self.lbl_core_badge)
+        row1.addStretch(1)
 
         self.chk_startup = QCheckBox("开机自启")
         self.chk_startup.setChecked(self.core_mgr.is_windows_startup_enabled())
         self.chk_startup.toggled.connect(self._on_toggle_windows_startup)
-        layout.addWidget(self.chk_startup)
+        row1.addWidget(self.chk_startup)
 
         self.chk_auto_heal = QCheckBox("AI 自动巡检自愈")
         self.chk_auto_heal.setChecked(True)
         self.chk_auto_heal.toggled.connect(self._on_toggle_auto_heal)
-        layout.addWidget(self.chk_auto_heal)
+        row1.addWidget(self.chk_auto_heal)
 
-        btn_webui = QPushButton("🌐 WebUI")
+        btn_start_core = QPushButton("▶ 启动本地引擎")
+        btn_start_core.setProperty("btnRole", "success")
+        btn_start_core.clicked.connect(self._on_start_core)
+        row1.addWidget(btn_start_core)
+
+        btn_stop_core = QPushButton("■ 停止引擎")
+        btn_stop_core.setProperty("btnRole", "danger")
+        btn_stop_core.clicked.connect(self._on_stop_core)
+        row1.addWidget(btn_stop_core)
+
+        btn_webui = QPushButton("🌐 浏览器打开 WebUI")
         btn_webui.setProperty("btnRole", "secondary")
         btn_webui.clicked.connect(lambda: webbrowser.open(self.api.base_url))
-        layout.addWidget(btn_webui)
+        row1.addWidget(btn_webui)
+        outer.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("网关地址:"))
+        self.inp_base_url = QLineEdit(self.api.base_url)
+        self.inp_base_url.setMinimumWidth(160)
+        row2.addWidget(self.inp_base_url, 2)
+
+        row2.addWidget(QLabel("管理密码 (RESIN_ADMIN_TOKEN):"))
+        self.inp_admin_token = QLineEdit(self.api.admin_token)
+        self.inp_admin_token.setEchoMode(QLineEdit.Password)
+        self.inp_admin_token.setMinimumWidth(100)
+        row2.addWidget(self.inp_admin_token, 1)
+
+        row2.addWidget(QLabel("代理密码 (RESIN_PROXY_TOKEN):"))
+        self.inp_proxy_token = QLineEdit(self.api.proxy_token)
+        self.inp_proxy_token.setEchoMode(QLineEdit.Password)
+        self.inp_proxy_token.setMinimumWidth(100)
+        row2.addWidget(self.inp_proxy_token, 1)
+
+        btn_connect = QPushButton("🔄 连接 / 刷新全局数据")
+        btn_connect.clicked.connect(self.refresh_all_views)
+        row2.addWidget(btn_connect)
+        outer.addLayout(row2)
 
         return bar
 

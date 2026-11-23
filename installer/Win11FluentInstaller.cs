@@ -1,3 +1,6 @@
+// Resin 智能代理池网关 v1.3.2 — 原生 Windows 11 Fluent Dark 全中文高分屏自适应安装器与卸载器
+// 采用硬件加速 .NET WPF + Win11 DWM 原生暗色圆角窗口 + 自适应 ScrollViewer 与底部固定按钮栏，完美兼容 100%~300% DPI 缩放与各种屏幕分辨率
+
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -12,14 +15,13 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Shapes;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("Resin 智能代理池网关 Windows 11 安装程序")]
 [assembly: AssemblyProduct("Resin 智能代理池网关")]
 [assembly: AssemblyCompany("Resin Project")]
-[assembly: AssemblyVersion("1.3.1.0")]
-[assembly: AssemblyFileVersion("1.3.1.0")]
+[assembly: AssemblyVersion("1.3.2.0")]
+[assembly: AssemblyFileVersion("1.3.2.0")]
 
 namespace ResinWin11Installer
 {
@@ -85,10 +87,7 @@ namespace ResinWin11Installer
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
-        [DllImport("user32.dll")]
-        private static extern bool SetProcessDPIAware();
-
-        private const string AppVersion = "1.3.1";
+        private const string AppVersion = "1.3.2";
         private const string AppDisplayName = "Resin 智能代理池网关";
         private const string UninstallRegKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Resin";
         private const string AutorunRegKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -107,8 +106,8 @@ namespace ResinWin11Installer
         private TextBlock _lblProgressStage;
         private TextBlock _lblProgressFile;
         private TextBlock _lblProgressPercent;
-        private Border _progressBarFill;
-        private double _progressBarMaxWidth = 580.0;
+        private ColumnDefinition _colProgressFill;
+        private ColumnDefinition _colProgressRemain;
 
         public Win11InstallerWindow(bool isUninstallMode)
         {
@@ -116,16 +115,33 @@ namespace ResinWin11Installer
             Title = _isUninstallMode
                 ? "卸载 Resin 智能代理池网关 v" + AppVersion
                 : "Resin 智能代理池网关 v" + AppVersion + " — Windows 11 安装向导";
-            Width = 660;
-            Height = 470;
+
+            Rect workArea = SystemParameters.WorkArea;
+            double targetW = Math.Min(740.0, Math.Max(560.0, workArea.Width * 0.90));
+            double maxH = Math.Max(460.0, workArea.Height * 0.92);
+
+            Width = targetW;
+            MinWidth = Math.Min(580.0, workArea.Width * 0.85);
+            MinHeight = Math.Min(460.0, maxH);
+            MaxWidth = workArea.Width * 0.96;
+            MaxHeight = maxH;
+
+            // 自动根据实际 DPI 与字体高度适配窗口高度，同时受 MaxHeight 安全边界约束，永不超出屏幕
+            SizeToContent = SizeToContent.Height;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
-            WindowStyle = WindowStyle.None;
-            AllowsTransparency = true;
-            Background = Brushes.Transparent;
-            ResizeMode = ResizeMode.NoResize;
+            WindowStyle = WindowStyle.SingleBorderWindow;
+            ResizeMode = ResizeMode.CanResize;
+            UseLayoutRounding = true;
+            SnapsToDevicePixels = true;
+            TextOptions.SetTextFormattingMode(this, TextFormattingMode.Display);
+            TextOptions.SetTextRenderingMode(this, TextRenderingMode.ClearType);
+
+            Background = HexBrush("#0B1120");
+            Foreground = HexBrush("#F8FAFC");
             FontFamily = new FontFamily("Microsoft YaHei UI, Microsoft YaHei, Segoe UI");
 
             Loaded += OnWindowLoaded;
+            ContentRendered += OnWindowContentRendered;
             Content = BuildRootShell();
         }
 
@@ -135,11 +151,27 @@ namespace ResinWin11Installer
             {
                 IntPtr hwnd = new WindowInteropHelper(this).Handle;
                 int dark = 1;
-                DwmSetWindowAttribute(hwnd, 20, ref dark, sizeof(int));
-                int round = 2; // DWMWCP_ROUND
-                DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int));
+                DwmSetWindowAttribute(hwnd, 20, ref dark, sizeof(int)); // DWMWA_USE_IMMERSIVE_DARK_MODE
+                DwmSetWindowAttribute(hwnd, 19, ref dark, sizeof(int)); // DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
+                int round = 2;
+                DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int)); // DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND
+                int captionColor = 0x002A170F; // COLORREF BGR for #0F172A
+                DwmSetWindowAttribute(hwnd, 35, ref captionColor, sizeof(int)); // DWMWA_CAPTION_COLOR
             }
             catch { }
+        }
+
+        private void OnWindowContentRendered(object sender, EventArgs e)
+        {
+            // 内容渲染完成后切换为 Manual 以便用户可自由拖拽调整大小，并精确居中于工作区
+            Rect workArea = SystemParameters.WorkArea;
+            double actualH = Math.Min(ActualHeight, workArea.Height * 0.92);
+            double actualW = Math.Min(ActualWidth, workArea.Width * 0.95);
+            SizeToContent = SizeToContent.Manual;
+            Width = actualW;
+            Height = Math.Max(MinHeight, actualH);
+            Left = workArea.Left + Math.Max(0, (workArea.Width - Width) / 2.0);
+            Top = workArea.Top + Math.Max(0, (workArea.Height - Height) / 2.0);
         }
 
         private static SolidColorBrush HexBrush(string hex)
@@ -149,55 +181,69 @@ namespace ResinWin11Installer
 
         private UIElement BuildRootShell()
         {
-            Border outer = new Border
+            Grid mainGrid = new Grid
             {
-                CornerRadius = new CornerRadius(14),
                 Background = HexBrush("#0B1120"),
-                BorderBrush = HexBrush("#1E293B"),
-                BorderThickness = new Thickness(1.5),
-                Margin = new Thickness(8),
             };
-
-            Grid mainGrid = new Grid();
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            Border titleBar = new Border
+            // 1. 顶部品牌横幅栏
+            Border headerBanner = new Border
             {
                 Background = HexBrush("#0F172A"),
-                CornerRadius = new CornerRadius(14, 14, 0, 0),
                 BorderBrush = HexBrush("#1E293B"),
                 BorderThickness = new Thickness(0, 0, 0, 1),
+                Padding = new Thickness(24, 14, 24, 14),
             };
-            titleBar.MouseLeftButtonDown += (s, e) => { if (e.ButtonState == MouseButtonState.Pressed) DragMove(); };
 
-            DockPanel titleDock = new DockPanel { LastChildFill = true, Margin = new Thickness(16, 0, 10, 0) };
-            TextBlock titleText = new TextBlock
+            DockPanel headerDock = new DockPanel { LastChildFill = true };
+            Border versionBadge = new Border
+            {
+                Background = HexBrush("#0284C7"),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(10, 4, 10, 4),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = "v" + AppVersion + " Win11 64位正式版",
+                    Foreground = Brushes.White,
+                    FontSize = 12,
+                    FontWeight = FontWeights.Bold,
+                },
+            };
+            DockPanel.SetDock(versionBadge, Dock.Right);
+
+            StackPanel titleStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            titleStack.Children.Add(new TextBlock
             {
                 Text = _isUninstallMode
-                    ? "🛡️ Resin 智能代理池网关 v" + AppVersion + " — 卸载管理向导"
-                    : "🛡️ Resin 智能代理池网关 v" + AppVersion + " — Windows 11 现代安装器",
+                    ? "🛡️ Resin 智能代理池网关 — 卸载向导"
+                    : "🛡️ Resin 智能代理池网关 — Windows 11 安装向导",
                 Foreground = HexBrush("#38BDF8"),
-                FontSize = 13.5,
-                FontWeight = FontWeights.SemiBold,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
+                FontSize = 18,
+                FontWeight = FontWeights.Bold,
+                TextWrapping = TextWrapping.Wrap,
+            });
+            titleStack.Children.Add(new TextBlock
+            {
+                Text = _isUninstallMode
+                    ? "安全停止后台网关服务、清理快捷方式与系统注册表项"
+                    : "将海量代理订阅转化为稳定、智能、可观测且支持粘性会话的高性能统一网关",
+                Foreground = HexBrush("#94A3B8"),
+                FontSize = 12.5,
+                Margin = new Thickness(0, 4, 12, 0),
+                TextWrapping = TextWrapping.Wrap,
+            });
 
-            StackPanel winBtns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-            DockPanel.SetDock(winBtns, Dock.Right);
+            headerDock.Children.Add(versionBadge);
+            headerDock.Children.Add(titleStack);
+            headerBanner.Child = headerDock;
+            Grid.SetRow(headerBanner, 0);
+            mainGrid.Children.Add(headerBanner);
 
-            Button btnMin = CreateChromeButton("—", "#94A3B8", () => WindowState = WindowState.Minimized);
-            Button btnClose = CreateChromeButton("✕", "#F87171", () => Close());
-            winBtns.Children.Add(btnMin);
-            winBtns.Children.Add(btnClose);
-
-            titleDock.Children.Add(winBtns);
-            titleDock.Children.Add(titleText);
-            titleBar.Child = titleDock;
-            Grid.SetRow(titleBar, 0);
-            mainGrid.Children.Add(titleBar);
-
-            Grid bodyContainer = new Grid { Margin = new Thickness(28, 20, 28, 22) };
+            // 2. 主体内容区
+            Grid bodyContainer = new Grid { Margin = new Thickness(24, 16, 24, 18) };
             _pageConfig = BuildConfigPage();
             _pageProgress = BuildProgressPage();
             _pageDone = BuildDonePage();
@@ -212,90 +258,87 @@ namespace ResinWin11Installer
             Grid.SetRow(bodyContainer, 1);
             mainGrid.Children.Add(bodyContainer);
 
-            outer.Child = mainGrid;
-            return outer;
-        }
-
-        private Button CreateChromeButton(string text, string fgHex, Action onClick)
-        {
-            Button btn = new Button
-            {
-                Content = text,
-                Width = 34,
-                Height = 28,
-                Background = Brushes.Transparent,
-                BorderThickness = new Thickness(0),
-                Foreground = HexBrush(fgHex),
-                FontSize = 13,
-                Cursor = Cursors.Hand,
-                Margin = new Thickness(2, 0, 0, 0),
-            };
-            btn.Click += (s, e) => onClick();
-            return btn;
+            return mainGrid;
         }
 
         private Grid BuildConfigPage()
         {
-            Grid g = new Grid();
-            StackPanel stack = new StackPanel();
-
-            TextBlock heroTitle = new TextBlock
-            {
-                Text = _isUninstallMode
-                    ? "确定要从电脑中卸载 Resin 智能代理池网关吗？"
-                    : "欢迎安装 Resin 智能代理池网关 v" + AppVersion,
-                Foreground = HexBrush("#F8FAFC"),
-                FontSize = 22,
-                FontWeight = FontWeights.Bold,
-                Margin = new Thickness(0, 0, 0, 6),
-            };
-            stack.Children.Add(heroTitle);
-
-            TextBlock heroSub = new TextBlock
-            {
-                Text = _isUninstallMode
-                    ? "卸载程序将自动停止后台正在运行的网关进程、移除桌面与开始菜单快捷方式并清理系统注册表。"
-                    : "将海量代理订阅转化为稳定、智能、可观测且支持粘性会话的高性能统一网关（内置 Go 核心与中文桌面控制台）。",
-                Foreground = HexBrush("#94A3B8"),
-                FontSize = 13,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 14),
-            };
-            stack.Children.Add(heroSub);
+            // 采用 3 行 Grid 架构：Row 0 顶部特性区 (Auto)，Row 1 中部自适应滚动区 (*)，Row 2 底部固定按钮栏 (Auto)
+            // 确保在任何分辨率与系统文字缩放 (100%~300%) 下底部「立即安装」按钮永远固定可见、绝不裁剪
+            Grid pageGrid = new Grid();
+            pageGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            pageGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            pageGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
             if (!_isUninstallMode)
             {
-                WrapPanel pills = new WrapPanel { Margin = new Thickness(0, 0, 0, 14) };
+                WrapPanel pills = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
                 pills.Children.Add(CreatePill("⚡ Go 1.26 高并发内核"));
                 pills.Children.Add(CreatePill("🖥️ PySide6 原生中文界面"));
                 pills.Children.Add(CreatePill("📈 实时吞吐折线监控"));
                 pills.Children.Add(CreatePill("🤖 AI 自动巡检与大模型网关"));
                 pills.Children.Add(CreatePill("📥 系统托盘常驻与开机自启"));
-                stack.Children.Add(pills);
+                Grid.SetRow(pills, 0);
+                pageGrid.Children.Add(pills);
+            }
+            else
+            {
+                Border warnCard = new Border
+                {
+                    Background = HexBrush("#1E293B"),
+                    BorderBrush = HexBrush("#EF4444"),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(10),
+                    Padding = new Thickness(16, 14, 16, 14),
+                    Margin = new Thickness(0, 0, 0, 12),
+                    Child = new TextBlock
+                    {
+                        Text = "您即将从电脑中卸载 Resin 智能代理池网关。卸载过程会自动停止正在运行的网关守护进程，并移除桌面快捷方式、开始菜单入口与系统注册表信息。",
+                        Foreground = HexBrush("#F8FAFC"),
+                        FontSize = 13.5,
+                        TextWrapping = TextWrapping.Wrap,
+                        LineHeight = 22,
+                    },
+                };
+                Grid.SetRow(warnCard, 0);
+                pageGrid.Children.Add(warnCard);
+            }
 
+            // 中部滚动容器
+            ScrollViewer scroll = new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Padding = new Thickness(0, 0, 4, 0),
+            };
+
+            StackPanel midStack = new StackPanel();
+            if (!_isUninstallMode)
+            {
+                // 安装目录选择卡片
                 Border dirCard = new Border
                 {
                     Background = HexBrush("#1E293B"),
                     BorderBrush = HexBrush("#334155"),
                     BorderThickness = new Thickness(1),
                     CornerRadius = new CornerRadius(10),
-                    Padding = new Thickness(14, 12, 14, 12),
-                    Margin = new Thickness(0, 0, 0, 14),
+                    Padding = new Thickness(16, 12, 16, 14),
+                    Margin = new Thickness(0, 0, 0, 12),
                 };
                 StackPanel dirStack = new StackPanel();
                 dirStack.Children.Add(new TextBlock
                 {
-                    Text = "📂 安装位置 (支持自定义任意磁盘路径)",
+                    Text = "📂 安装位置 (支持自定义任意磁盘路径，免管理员权限即可极速部署)",
                     Foreground = HexBrush("#38BDF8"),
-                    FontSize = 12.5,
+                    FontSize = 13,
                     FontWeight = FontWeights.SemiBold,
+                    TextWrapping = TextWrapping.Wrap,
                     Margin = new Thickness(0, 0, 0, 8),
                 });
 
-                DockPanel dirRow = new DockPanel { LastChildFill = true };
-                Button btnBrowse = CreateActionButton("浏览文件夹...", "#334155", "#E2E8F0", 110, 34, OnBrowseFolder);
-                DockPanel.SetDock(btnBrowse, Dock.Right);
-                btnBrowse.Margin = new Thickness(8, 0, 0, 0);
+                Grid dirRow = new Grid();
+                dirRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                dirRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
                 string defaultDir = System.IO.Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -305,44 +348,96 @@ namespace ResinWin11Installer
                 _txtInstallDir = new TextBox
                 {
                     Text = defaultDir,
-                    Height = 34,
+                    MinHeight = 36,
                     VerticalContentAlignment = VerticalAlignment.Center,
                     Background = HexBrush("#0F172A"),
                     Foreground = HexBrush("#F8FAFC"),
                     BorderBrush = HexBrush("#334155"),
                     BorderThickness = new Thickness(1),
-                    Padding = new Thickness(10, 0, 10, 0),
+                    Padding = new Thickness(10, 6, 10, 6),
                     FontSize = 13,
                 };
-                dirRow.Children.Add(btnBrowse);
+                Grid.SetColumn(_txtInstallDir, 0);
+
+                Button btnBrowse = CreateActionButton("浏览文件夹...", "#334155", "#E2E8F0", 118, 36, OnBrowseFolder);
+                btnBrowse.Margin = new Thickness(10, 0, 0, 0);
+                Grid.SetColumn(btnBrowse, 1);
+
                 dirRow.Children.Add(_txtInstallDir);
+                dirRow.Children.Add(btnBrowse);
                 dirStack.Children.Add(dirRow);
                 dirCard.Child = dirStack;
-                stack.Children.Add(dirCard);
+                midStack.Children.Add(dirCard);
 
+                // 安装选项卡片
                 Border optCard = new Border
                 {
                     Background = HexBrush("#1E293B"),
                     BorderBrush = HexBrush("#334155"),
                     BorderThickness = new Thickness(1),
                     CornerRadius = new CornerRadius(10),
-                    Padding = new Thickness(14, 12, 14, 12),
-                    Margin = new Thickness(0, 0, 0, 18),
+                    Padding = new Thickness(16, 12, 16, 14),
+                    Margin = new Thickness(0, 0, 0, 8),
                 };
-                UniformGrid optGrid = new UniformGrid { Columns = 2, Rows = 2 };
+                StackPanel optStack = new StackPanel();
+                optStack.Children.Add(new TextBlock
+                {
+                    Text = "⚙️ 快捷方式与启动选项",
+                    Foreground = HexBrush("#38BDF8"),
+                    FontSize = 13,
+                    FontWeight = FontWeights.SemiBold,
+                    Margin = new Thickness(0, 0, 0, 8),
+                });
+
+                Grid optGrid = new Grid();
+                optGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                optGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                optGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                optGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
                 _chkDesktopIcon = CreateModernCheckBox("创建桌面快捷方式", true);
                 _chkStartMenu = CreateModernCheckBox("创建开始菜单程序快捷方式", true);
                 _chkAutorun = CreateModernCheckBox("开机自动启动并驻留系统托盘", true);
                 _chkLaunchAfter = CreateModernCheckBox("安装完成后立即启动 Resin", true);
+
+                Grid.SetRow(_chkDesktopIcon, 0); Grid.SetColumn(_chkDesktopIcon, 0);
+                Grid.SetRow(_chkStartMenu, 0); Grid.SetColumn(_chkStartMenu, 1);
+                Grid.SetRow(_chkAutorun, 1); Grid.SetColumn(_chkAutorun, 0);
+                Grid.SetRow(_chkLaunchAfter, 1); Grid.SetColumn(_chkLaunchAfter, 1);
+
                 optGrid.Children.Add(_chkDesktopIcon);
                 optGrid.Children.Add(_chkStartMenu);
                 optGrid.Children.Add(_chkAutorun);
                 optGrid.Children.Add(_chkLaunchAfter);
-                optCard.Child = optGrid;
-                stack.Children.Add(optCard);
+
+                optStack.Children.Add(optGrid);
+                optCard.Child = optStack;
+                midStack.Children.Add(optCard);
             }
 
+            scroll.Content = midStack;
+            Grid.SetRow(scroll, 1);
+            pageGrid.Children.Add(scroll);
+
+            // Row 2: 底部固定操作按钮栏
+            Border bottomBorder = new Border
+            {
+                BorderBrush = HexBrush("#1E293B"),
+                BorderThickness = new Thickness(0, 1, 0, 0),
+                Padding = new Thickness(0, 14, 0, 0),
+                Margin = new Thickness(0, 8, 0, 0),
+            };
             DockPanel bottomBar = new DockPanel { LastChildFill = false };
+
+            TextBlock tipLeft = new TextBlock
+            {
+                Text = _isUninstallMode ? "感谢您使用 Resin 智能代理池网关" : "内置 Go 核心引擎 + PySide6 原生中文控制台",
+                Foreground = HexBrush("#64748B"),
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            DockPanel.SetDock(tipLeft, Dock.Left);
+
             Button btnCancel = CreateActionButton("取消退出", "#334155", "#E2E8F0", 110, 42, () => Close());
             DockPanel.SetDock(btnCancel, Dock.Right);
             btnCancel.Margin = new Thickness(10, 0, 0, 0);
@@ -352,17 +447,20 @@ namespace ResinWin11Installer
                 : CreateActionButton("⚡ 立即安装 Resin v" + AppVersion, "#0284C7", "#FFFFFF", 240, 42, StartInstallAsync);
             DockPanel.SetDock(btnPrimary, Dock.Right);
 
+            bottomBar.Children.Add(tipLeft);
             bottomBar.Children.Add(btnCancel);
             bottomBar.Children.Add(btnPrimary);
-            stack.Children.Add(bottomBar);
+            bottomBorder.Child = bottomBar;
 
-            g.Children.Add(stack);
-            return g;
+            Grid.SetRow(bottomBorder, 2);
+            pageGrid.Children.Add(bottomBorder);
+
+            return pageGrid;
         }
 
         private Grid BuildProgressPage()
         {
-            Grid g = new Grid();
+            Grid g = new Grid { VerticalAlignment = VerticalAlignment.Center };
             StackPanel stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
 
             _lblProgressStage = new TextBlock
@@ -371,6 +469,7 @@ namespace ResinWin11Installer
                 Foreground = HexBrush("#38BDF8"),
                 FontSize = 20,
                 FontWeight = FontWeights.Bold,
+                TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 0, 0, 10),
             };
             stack.Children.Add(_lblProgressStage);
@@ -385,32 +484,37 @@ namespace ResinWin11Installer
             };
             stack.Children.Add(_lblProgressPercent);
 
+            // 自适应比例宽度进度条，无论窗口宽度如何变化都 100% 贴合
             Border track = new Border
             {
-                Width = _progressBarMaxWidth,
-                Height = 16,
-                CornerRadius = new CornerRadius(8),
+                Height = 18,
+                CornerRadius = new CornerRadius(9),
                 Background = HexBrush("#1E293B"),
                 BorderBrush = HexBrush("#334155"),
                 BorderThickness = new Thickness(1),
-                HorizontalAlignment = HorizontalAlignment.Left,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
                 Margin = new Thickness(0, 0, 0, 14),
             };
+
+            Grid progGrid = new Grid();
+            _colProgressFill = new ColumnDefinition { Width = new GridLength(0, GridUnitType.Star) };
+            _colProgressRemain = new ColumnDefinition { Width = new GridLength(100, GridUnitType.Star) };
+            progGrid.ColumnDefinitions.Add(_colProgressFill);
+            progGrid.ColumnDefinitions.Add(_colProgressRemain);
 
             LinearGradientBrush grad = new LinearGradientBrush(
                 (Color)ColorConverter.ConvertFromString("#0284C7"),
                 (Color)ColorConverter.ConvertFromString("#10B981"),
                 0.0
             );
-            _progressBarFill = new Border
+            Border fillBorder = new Border
             {
-                Width = 0,
-                Height = 14,
-                CornerRadius = new CornerRadius(7),
+                CornerRadius = new CornerRadius(8),
                 Background = grad,
-                HorizontalAlignment = HorizontalAlignment.Left,
             };
-            track.Child = _progressBarFill;
+            Grid.SetColumn(fillBorder, 0);
+            progGrid.Children.Add(fillBorder);
+            track.Child = progGrid;
             stack.Children.Add(track);
 
             _lblProgressFile = new TextBlock
@@ -429,12 +533,16 @@ namespace ResinWin11Installer
         private Grid BuildDonePage()
         {
             Grid g = new Grid();
-            StackPanel stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+            StackPanel stack = new StackPanel
+            {
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+            };
 
             TextBlock badge = new TextBlock
             {
                 Text = "✅",
-                FontSize = 48,
+                FontSize = 46,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 10),
             };
@@ -448,6 +556,8 @@ namespace ResinWin11Installer
                 Foreground = HexBrush("#10B981"),
                 FontSize = 22,
                 FontWeight = FontWeights.Bold,
+                TextWrapping = TextWrapping.Wrap,
+                TextAlignment = TextAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 10),
             };
@@ -460,6 +570,8 @@ namespace ResinWin11Installer
                     : "桌面与开始菜单快捷方式已就绪，内置 Go 1.26 核心网关与 AI 自动巡检引擎随时待命。",
                 Foreground = HexBrush("#94A3B8"),
                 FontSize = 13.5,
+                TextWrapping = TextWrapping.Wrap,
+                TextAlignment = TextAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 26),
             };
@@ -488,7 +600,7 @@ namespace ResinWin11Installer
                 BorderBrush = HexBrush("#0284C7"),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(10, 4, 10, 4),
+                Padding = new Thickness(10, 5, 10, 5),
                 Margin = new Thickness(0, 0, 8, 6),
                 Child = new TextBlock
                 {
@@ -508,10 +620,11 @@ namespace ResinWin11Installer
                     Text = label,
                     Foreground = HexBrush("#E2E8F0"),
                     FontSize = 13,
-                    Margin = new Thickness(4, -1, 0, 0),
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(6, -1, 8, 0),
                 },
                 IsChecked = isChecked,
-                Margin = new Thickness(0, 4, 12, 4),
+                Margin = new Thickness(0, 6, 8, 6),
                 VerticalContentAlignment = VerticalAlignment.Center,
                 Cursor = Cursors.Hand,
             };
@@ -521,16 +634,17 @@ namespace ResinWin11Installer
         {
             Button btn = new Button
             {
-                Width = w,
-                Height = h,
+                MinWidth = w,
+                MinHeight = h,
                 Background = Brushes.Transparent,
                 BorderThickness = new Thickness(0),
                 Cursor = Cursors.Hand,
             };
             Border b = new Border
             {
-                Width = w,
-                Height = h,
+                MinWidth = w,
+                MinHeight = h,
+                Padding = new Thickness(14, 6, 14, 6),
                 CornerRadius = new CornerRadius(8),
                 Background = HexBrush(bgHex),
                 Child = new TextBlock
@@ -579,7 +693,8 @@ namespace ResinWin11Installer
                 _lblProgressStage.Text = stage;
                 _lblProgressPercent.Text = pct.ToString() + "%";
                 _lblProgressFile.Text = detail;
-                _progressBarFill.Width = _progressBarMaxWidth * (pct / 100.0);
+                _colProgressFill.Width = new GridLength(pct, GridUnitType.Star);
+                _colProgressRemain.Width = new GridLength(Math.Max(0, 100 - pct), GridUnitType.Star);
             });
         }
 
@@ -862,8 +977,6 @@ namespace ResinWin11Installer
         [STAThread]
         public static int Main(string[] args)
         {
-            try { SetProcessDPIAware(); } catch { }
-
             bool silent = false;
             bool uninstall = false;
             string customDir = System.IO.Path.Combine(
